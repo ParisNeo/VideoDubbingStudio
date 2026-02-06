@@ -1,0 +1,241 @@
+<div id="view-video_dub" class="view-section" style="display: none;">
+    <header class="view-header">
+        <div class="header-content">
+            <h1><i class="fas fa-video"></i> Video Dubbing Studio</h1>
+            <p class="subtitle">Automated speaker identification and dubbing pipeline</p>
+        </div>
+        <div id="project-controls" class="header-actions" style="display:none;">
+            <span id="current-project-name" class="badge-project">Untitled</span>
+            <button id="cancel-project-btn" class="btn-sm btn-danger"><i class="fas fa-times"></i> Close Project</button>
+        </div>
+    </header>
+
+    <div id="dubbing-wizard" class="wizard-container">
+        
+        <!-- STATE 1: UPLOAD (Start) -->
+        <div id="state-upload" class="wizard-step active">
+            <div class="card centered-card upload-card">
+                <h3>Start New Project</h3>
+                <p>Upload a video or paste a YouTube URL to begin the identification pipeline.</p>
+                
+                <!-- YouTube Download Section -->
+                <div id="youtube-section" class="youtube-input-section">
+                    <div class="input-group">
+                        <input type="text" id="youtube-url" placeholder="https://www.youtube.com/watch?v=..." class="youtube-input">
+                        <button type="button" id="download-youtube-btn" class="btn-secondary">
+                            <i class="fas fa-download"></i> Download
+                        </button>
+                    </div>
+                    <div id="youtube-progress" class="youtube-progress hidden">
+                        <div class="progress-bar">
+                            <div id="youtube-progress-fill" class="progress-fill" style="width: 0%"></div>
+                        </div>
+                        <span id="youtube-status">Downloading...</span>
+                    </div>
+                    <div id="youtube-error" class="youtube-error hidden"></div>
+                </div>
+                
+                <div class="divider"><span>OR</span></div>
+                
+                <form id="upload-form">
+                    <div class="drop-zone" onclick="document.getElementById('video-input').click()">
+                        <i class="fas fa-cloud-upload-alt fa-3x"></i>
+                        <p id="file-display-text">Click to browse or drag video here</p>
+                        <input type="file" id="video-input" name="file" accept="video/*" hidden>
+                    </div>
+                    
+                    <!-- NEW: Project Configuration Options -->
+                    <div class="project-options">
+                        <h4><i class="fas fa-cog"></i> Project Settings</h4>
+                        
+                        <div class="options-grid">
+                            <!-- Source Language -->
+                            <div class="option-group">
+                                <label for="src-lang">
+                                    <i class="fas fa-language"></i> Source Language
+                                    <span class="help-text">Language in the video (or Auto-detect)</span>
+                                </label>
+                                <select name="src_lang" id="src-lang" class="input-select">
+                                    <option value="auto" selected>🔍 Auto-detect</option>
+                                    <option value="en">🇺🇸 English</option>
+                                    <option value="es">🇪🇸 Spanish</option>
+                                    <option value="fr">🇫🇷 French</option>
+                                    <option value="de">🇩🇪 German</option>
+                                    <option value="it">🇮🇹 Italian</option>
+                                    <option value="pt">🇵🇹 Portuguese</option>
+                                    <option value="zh">🇨🇳 Chinese</option>
+                                    <option value="ja">🇯🇵 Japanese</option>
+                                    <option value="ko">🇰🇷 Korean</option>
+                                    <option value="ar">🇸🇦 Arabic</option>
+                                    <option value="ru">🇷🇺 Russian</option>
+                                    <option value="hi">🇮🇳 Hindi</option>
+                                    <option value="nl">🇳🇱 Dutch</option>
+                                    <option value="pl">🇵🇱 Polish</option>
+                                    <option value="tr">🇹🇷 Turkish</option>
+                                    <option value="vi">🇻🇳 Vietnamese</option>
+                                    <option value="th">🇹🇭 Thai</option>
+                                </select>
+                            </div>
+                            
+                            <!-- Target/Translation Language -->
+                            <div class="option-group">
+                                <label for="tgt-lang">
+                                    <i class="fas fa-exchange-alt"></i> Translate To
+                                    <span class="help-text">Target language for dubbing</span>
+                                </label>
+                                <select name="tgt_lang" id="tgt-lang" class="input-select">
+                                    <option value="en" selected>🇺🇸 English</option>
+                                    <option value="es">🇪🇸 Spanish</option>
+                                    <option value="fr">🇫🇷 French</option>
+                                    <option value="de">🇩🇪 German</option>
+                                    <option value="it">🇮🇹 Italian</option>
+                                    <option value="pt">🇵🇹 Portuguese</option>
+                                    <option value="zh">🇨🇳 Chinese</option>
+                                    <option value="ja">🇯🇵 Japanese</option>
+                                    <option value="ko">🇰🇷 Korean</option>
+                                    <option value="ar">🇸🇦 Arabic</option>
+                                    <option value="ru">🇷🇺 Russian</option>
+                                    <option value="hi">🇮🇳 Hindi</option>
+                                    <option value="nl">🇳🇱 Dutch</option>
+                                    <option value="pl">🇵🇱 Polish</option>
+                                    <option value="tr">🇹🇷 Turkish</option>
+                                    <option value="vi">🇻🇳 Vietnamese</option>
+                                    <option value="th">🇹🇭 Thai</option>
+                                </select>
+                            </div>
+                            
+                            <!-- Background Separation -->
+                            <div class="option-group option-checkbox">
+                                <label for="separate-audio" class="checkbox-label">
+                                    <input type="checkbox" id="separate-audio" name="separate_audio" value="true">
+                                    <span class="checkmark"></span>
+                                    <div class="checkbox-text">
+                                        <i class="fas fa-music"></i> Separate Background Audio
+                                        <span class="help-text">Use AI to isolate speech from music/noise (slower but better quality)</span>
+                                    </div>
+                                </label>
+                            </div>
+                            
+                            <!-- TTS Engine Selection -->
+                            <div class="option-group">
+                                <label for="tts-engine">
+                                    <i class="fas fa-microphone-alt"></i> Voice Engine
+                                    <span class="help-text">Speech synthesis model to use</span>
+                                </label>
+                                <select name="tts_engine" id="tts-engine" class="input-select">
+                                    <option value="f5" selected>F5-TTS (Fast, High Quality)</option>
+                                    <option value="fishspeech">FishSpeech (Alternative)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="form-row submit-row">
+                        <button type="submit" class="btn-primary" id="upload-submit-btn" disabled>
+                            <i class="fas fa-magic"></i> Analyze Video
+                        </button>
+                    </div>
+                    
+                    <!-- Download Original Button - shown when YouTube video is downloaded -->
+                    <div class="form-row" style="margin-top: 12px; justify-content: center;">
+                        <button type="button" id="download-original-btn" class="btn-secondary hidden" title="Download the original YouTube video file">
+                            <i class="fas fa-file-video"></i> Download Original Video
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- STATE 2: PROCESSING (Logs & Progress + Transcription Table) -->
+        <div id="state-processing" class="wizard-step hidden">
+            <div class="monitor-panel">
+                <!-- Status Bar -->
+                <div class="status-card">
+                    <div class="status-header">
+                        <h3 id="processing-step-title">Processing...</h3>
+                        <span id="processing-percent" class="percent-badge">0%</span>
+                    </div>
+                    <div class="progress-track">
+                        <div id="main-progress-bar" class="progress-fill" style="width: 0%"></div>
+                    </div>
+                    <div id="processing-status-text" class="status-detail">Initializing...</div>
+                </div>
+
+                <!-- Terminal -->
+                <div class="terminal-window large-term">
+                    <div class="term-header">
+                        <span><i class="fas fa-terminal"></i> System Output</span>
+                    </div>
+                    <div id="processing-term" class="log-content"></div>
+                </div>
+                
+                <!-- Transcription Table - dynamically inserted here by JS -->
+            </div>
+        </div>
+
+        <!-- STATE 3: VALIDATION (Speaker Grid + Transcription Table) -->
+        <div id="state-validation" class="wizard-step hidden">
+            <div class="split-view">
+                <div class="main-content">
+                    <div class="section-header">
+                        <h3><i class="fas fa-users"></i> Speaker Identification</h3>
+                        <button id="start-dub-btn" class="btn-success">
+                            Start Dubbing <i class="fas fa-arrow-right"></i>
+                        </button>
+                    </div>
+                    
+                    <!-- Transcription Review Section -->
+                    <div class="card" style="margin-bottom: 20px;">
+                        <h4 style="margin-bottom: 12px; color: var(--accent);">
+                            <i class="fas fa-closed-captioning"></i> Review Transcription
+                        </h4>
+                        <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 16px;">
+                            Below is the speech transcription with speaker identification. 
+                            Please verify speakers and click "Start Dubbing" when ready. 
+                            Translations will appear in the next step.
+                        </p>
+                        <div id="transcription-container" style="max-height: 300px; overflow-y: auto;">
+                            <!-- Populated by JavaScript -->
+                            <div class="empty-state">
+                                <i class="fas fa-spinner fa-spin"></i> Loading transcription...
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div id="speaker-grid" class="speaker-grid">
+                        <!-- Speakers injected here -->
+                    </div>
+                </div>
+                
+                <div class="sidebar-content">
+                    <div class="mini-terminal">
+                        <div class="term-header">Logs</div>
+                        <div id="term-content" class="log-content small"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- STATE 4: RESULT -->
+        <div id="state-result" class="wizard-step hidden">
+            <div class="card result-card">
+                <div class="success-icon"><i class="fas fa-check-circle"></i></div>
+                <h2>Dubbing Complete!</h2>
+                
+                <div class="video-wrapper">
+                    <video id="final-video" controls></video>
+                </div>
+                
+                <div class="action-row">
+                    <a id="download-btn" href="#" class="btn-primary" download>
+                        <i class="fas fa-download"></i> Download
+                    </a>
+                    <button onclick="location.reload()" class="btn-secondary">
+                        Start New Project
+                    </button>
+                </div>
+            </div>
+        </div>
+
+    </div>
+</div>

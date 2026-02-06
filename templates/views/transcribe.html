@@ -1,0 +1,24 @@
+<div id="view-transcribe" class="view-section" style="display: none;">
+    <header><h1>Audio Transcription</h1></header>
+    <div class="create-container">
+        <div class="card">
+            <form id="transcribe-form">
+                <div class="file-drop-area">
+                    <i class="fas fa-file-audio"></i>
+                    <span>Drop Audio/Video File</span>
+                    <input type="file" name="file" class="file-input" required>
+                </div>
+                <div class="options-grid">
+                    <label>Translate To (Optional): <input type="text" name="translate_to" placeholder="e.g. French"></label>
+                </div>
+                <button type="submit" class="btn-primary full-width">Transcribe</button>
+            </form>
+        </div>
+        
+        <div id="transcribe-result" class="card" style="display:none; margin-top:20px;">
+            <h3>Transcript</h3>
+            <textarea id="transcribe-text-out" class="text-area-output" readonly></textarea>
+            <button id="copy-transcribe-btn" class="btn-secondary">Copy Text</button>
+        </div>
+    </div>
+</div>

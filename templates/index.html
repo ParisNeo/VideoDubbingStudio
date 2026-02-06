@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VoiceDub Pro Modular</title>
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    
+    <!-- Icons (LOCAL FILE) -->
+    <link rel="stylesheet" href="/static/css/all.min.css">
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="/static/css/style.css">
+    
+    <!-- Marked.js for markdown rendering in analysis -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+
+<div class="app-wrapper">
+    <!-- SIDEBAR -->
+    <nav id="sidebar">
+        <div class="brand">
+            <i class="fas fa-layer-group"></i> VoiceDub
+        </div>
+        
+        <ul class="nav-links">
+            <li data-view="dashboard" class="active">
+                <i class="fas fa-home"></i> Dashboard
+            </li>
+            <li data-view="video_dub">
+                <i class="fas fa-video"></i> Video Dubbing
+            </li>
+            <li data-view="transcribe">
+                <i class="fas fa-file-audio"></i> Transcribe
+            </li>
+            <li data-view="analysis">
+                <i class="fas fa-chart-pie"></i> Analysis
+            </li>
+            <li data-view="recorder">
+                <i class="fas fa-microphone"></i> Recorder
+            </li>
+        </ul>
+    </nav>
+
+    <!-- MAIN CONTENT -->
+    <main id="content">
+        <!-- Dashboard View -->
+        {% include 'views/dashboard.html' %}
+        
+        <!-- Video Dub View -->
+        {% include 'views/video_dub.html' %}
+        
+        <!-- Other Views -->
+        {% include 'views/transcribe.html' %}
+        {% include 'views/analysis.html' %}
+        {% include 'views/recorder.html' %}
+    </main>
+</div>
+
+<!-- Load Main Module -->
+<script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

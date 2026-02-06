@@ -1,0 +1,27 @@
+<div id="view-analysis" class="view-section" style="display: none;">
+    <header><h1>AI Analysis & Summaries</h1></header>
+    <div class="create-container">
+        <div class="card">
+            <form id="analysis-form">
+                <div class="file-drop-area">
+                    <i class="fas fa-brain"></i>
+                    <span>Drop Meeting Recording</span>
+                    <input type="file" name="file" class="file-input" required>
+                </div>
+                <div class="options-grid">
+                    <label>Mode: 
+                        <select name="mode">
+                            <option value="summary">General Summary</option>
+                            <option value="meeting_report">Meeting Minutes</option>
+                        </select>
+                    </label>
+                </div>
+                <button type="submit" class="btn-primary full-width">Analyze</button>
+            </form>
+        </div>
+        <div id="analysis-output" class="card" style="display:none;">
+            <h3>Analysis Result</h3>
+            <div id="analysis-content" class="markdown-body"></div>
+        </div>
+    </div>
+</div>

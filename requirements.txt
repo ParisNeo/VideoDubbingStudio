@@ -1,0 +1,29 @@
+# Deep‑learning framework
+torch>=2.0.0                # PyTorch (provides the tensor core)
+
+# Audio / video handling
+torchaudio                  # matches the installed torch version
+moviepy                     # video I/O and audio extraction
+ffmpeg-python               # thin wrapper used by moviepy (ffmpeg binary must be installed on the OS)
+
+# Model & tokeniser
+git+https://github.com/huggingface/transformers.git   # latest 🤗 Transformers (required for SeamlessM4T)
+sentencepiece                                         # SentencePiece tokenizer used by the model
+
+fastapi
+uvicorn
+python-multipart
+websockets
+yt_dlp
+tiktoken
+sentencepiece
+protobuf<4
+soundfile
+librosa
+python-dotenv
+git+https://github.com/SWivid/F5-TTS.git
+demucs
+vocos
+
+lollms-client
+ascii-colors

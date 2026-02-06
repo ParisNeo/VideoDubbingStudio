@@ -1,0 +1,5 @@
+.lollms
+.vscode
+*.mp4
+
+__pycache__
