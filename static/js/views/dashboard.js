@@ -8,6 +8,7 @@ window.openTask = openTask;
 window.deleteTask = deleteTask;
 window.resumeTask = resumeTask;
 window.restartTask = restartTask;
+window.newProject = newProject;
 
 export function init() {
     console.log('Dashboard: init() called');
@@ -18,6 +19,14 @@ export function init() {
         refreshBtn.addEventListener('click', () => {
             console.log('Dashboard: refresh clicked');
             loadTasks();
+        });
+    }
+    
+    // Bind new project button
+    const newProjectBtn = document.getElementById('new-project-btn');
+    if (newProjectBtn) {
+        newProjectBtn.addEventListener('click', () => {
+            newProject();
         });
     }
     
@@ -69,8 +78,8 @@ function renderTasks(tasks, container) {
         container.innerHTML = `
             <div class="empty-state">
                 <i class="fas fa-film" style="font-size: 3rem; margin-bottom: 15px; opacity: 0.5;"></i>
-                <p>No projects yet. Start by uploading a video!</p>
-                <button class="btn-primary" onclick="doSwitchView('video_dub')" style="margin-top: 15px;">
+                <p>No projects yet. Start by creating a new project!</p>
+                <button class="btn-primary" onclick="newProject()" style="margin-top: 15px;">
                     <i class="fas fa-plus"></i> New Project
                 </button>
             </div>
@@ -88,10 +97,12 @@ function renderTasks(tasks, container) {
             new Date(task.created_at * 1000).toLocaleDateString() : 'Unknown';
         
         // Determine available actions based on status
+        const isActuallyRunning = task.status === 'processing' && !task.was_running_at_shutdown;
         const canResume = ['paused', 'failed', 'error', 'resuming'].includes(task.status) ||
                          (task.status === 'processing' && task.was_running_at_shutdown);
-        const canRestart = !['processing', 'queued'].includes(task.status);
-        const canDelete = ['completed', 'failed', 'error', 'cancelled', 'done', 'success'].includes(task.status?.toLowerCase()) || canResume;
+        const canRestart = !['processing', 'queued'].includes(task.status) || task.was_running_at_shutdown;
+        // Allow delete for any task except actively running ones
+        const canDelete = !isActuallyRunning || task.was_running_at_shutdown || ['completed', 'failed', 'error', 'cancelled', 'paused'].includes(task.status);
         
         // Build action buttons HTML
         let actionButtons = '';
@@ -106,7 +117,6 @@ function renderTasks(tasks, container) {
                 </button>
             `;
         } else if (canResume) {
-            // Show resume button for interrupted/failed tasks
             const resumeIcon = task.was_running_at_shutdown ? 'fa-play-circle' : 'fa-play';
             const resumeText = task.was_running_at_shutdown ? 'Resume' : 'Retry';
             actionButtons = `
@@ -126,7 +136,6 @@ function renderTasks(tasks, container) {
                 </button>
             `;
         } else {
-            // Default: just open/monitor
             actionButtons = `
                 <button class="btn-primary btn-sm" onclick="openTask('${task.task_id}')">
                     <i class="fas fa-folder-open"></i> Open
@@ -134,28 +143,23 @@ function renderTasks(tasks, container) {
             `;
         }
         
-        // Add delete button if deletable
         const deleteButton = canDelete ? `
             <button class="btn-danger btn-sm" onclick="deleteTask('${task.task_id}', event)" title="Delete project">
                 <i class="fas fa-trash"></i>
             </button>
         ` : '';
         
-        // Warning indicator for interrupted tasks
         const interruptedWarning = task.was_running_at_shutdown ? `
             <span class="status-badge attention" title="App was restarted while this task was running">
                 <i class="fas fa-exclamation-triangle"></i> Interrupted
             </span>
         ` : '';
         
-        // Resume attempts indicator
         const resumeAttempts = task.resume_attempts > 0 ? `
             <span style="font-size: 0.75rem; color: var(--text-muted); margin-left: 8px;">
                 (retried ${task.resume_attempts}x)
             </span>
         ` : '';
-        
-        console.log(`Task ${task.task_id}: status="${task.status}", canResume=${canResume}, canRestart=${canRestart}, canDelete=${canDelete}, was_interrupted=${task.was_running_at_shutdown}`);
         
         return `
             <div class="task-card" data-task-id="${task.task_id}">
@@ -202,7 +206,7 @@ function getStatusClass(status) {
         'error': 'error',
         'paused': 'attention',
         'cancelled': 'error',
-        'resuming': 'processing'  // Show as processing when resuming
+        'resuming': 'processing'
     };
     return map[status] || 'default';
 }
@@ -228,10 +232,20 @@ function truncate(str, maxLen) {
     return str.length > maxLen ? str.slice(0, maxLen - 3) + '...' : str;
 }
 
-// Use function declaration for global registration
+function newProject() {
+    console.log('Dashboard: Creating new project');
+    // Switch to video dub view and ensure fresh state
+    import('./video_dub.js').then(mod => {
+        mod.startNewProject();
+    }).catch(err => {
+        console.error('Failed to load video_dub module:', err);
+        // Fallback: just switch view
+        doSwitchView('video_dub');
+    });
+}
+
 function openTask(taskId) {
     console.log(`Opening task: ${taskId}`);
-    // Import dynamically to avoid circular dependency
     import('./video_dub.js').then(mod => {
         mod.openMonitor(taskId);
     }).catch(err => {
@@ -246,8 +260,6 @@ async function resumeTask(taskId) {
     try {
         const response = await postJSON(`/api/projects/${taskId}/resume`, {});
         alert(`Task is resuming: ${response.message || 'Please wait...'}`);
-        
-        // Open the monitor to watch progress
         openTask(taskId);
     } catch (err) {
         alert('Failed to resume task: ' + err.message);
@@ -267,14 +279,11 @@ Options:
     
     if (!confirm(message)) return;
     
-    // If no specific phase, ask user (simplified - always restart from beginning for now)
     const payload = fromPhase ? { from_phase: fromPhase } : {};
     
     try {
         const response = await postJSON(`/api/projects/${taskId}/restart`, payload);
         alert(`Task restarted: ${response.message || 'Please wait...'}`);
-        
-        // Open the monitor to watch progress
         openTask(taskId);
     } catch (err) {
         alert('Failed to restart task: ' + err.message);
@@ -283,14 +292,26 @@ Options:
 
 function deleteTask(taskId, event) {
     if (event) event.stopPropagation();
-    if (!confirm('Delete this project permanently? This cannot be undone.')) return;
     
-    deleteResource(`/api/projects/${taskId}`)
-        .then(() => {
-            console.log(`Deleted task: ${taskId}`);
-            loadTasks(); // Refresh
-        })
-        .catch(err => {
-            alert('Delete failed: ' + err.message);
-        });
+    if (!confirm('Delete this project permanently? This cannot be undone.\n\nNote: If the task appears stuck, deletion will force-stop it.')) return;
+    
+    console.log(`Attempting to delete task: ${taskId}`);
+    
+    // Try cancel first (best effort), then delete
+    postJSON(`/api/projects/${taskId}/cancel`, {}).catch(err => {
+        console.log('Cancel before delete failed (expected):', err);
+    }).finally(() => {
+        performDelete(taskId);
+    });
+}
+
+async function performDelete(taskId) {
+    try {
+        await deleteResource(`/api/projects/${taskId}`);
+        console.log(`Successfully deleted task: ${taskId}`);
+        loadTasks();
+    } catch (err) {
+        console.error('Delete failed:', err);
+        alert('Delete failed: ' + err.message + '\n\nTry refreshing the page and deleting again.');
+    }
 }

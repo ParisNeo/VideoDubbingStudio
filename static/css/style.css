@@ -226,6 +226,13 @@ header h1 {
     justify-content: center;
 }
 
+/* Header actions for multiple buttons */
+.header-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
 /* CARDS */
 .card {
     background: var(--bg-panel); 
@@ -1053,6 +1060,16 @@ header h1 {
     
     #content {
         padding-bottom: 80px;
+    }
+    
+    .header-actions {
+        flex-wrap: wrap;
+        gap: 8px;
+    }
+    
+    .header-actions .btn-primary {
+        padding: 8px 12px;
+        font-size: 0.85rem;
     }
 }
 

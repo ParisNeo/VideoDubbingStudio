@@ -3,3 +3,9 @@
 *.mp4
 
 __pycache__
+*.db
+model_cache
+projects_db
+uploads
+outputs
+temp_chunks

@@ -20,6 +20,7 @@ import soundfile as sf
 import subprocess
 import logging
 import tempfile
+import traceback
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Tuple
 from dataclasses import dataclass
@@ -139,13 +140,17 @@ class Phase3Recomposer:
             return str(final_video_path)
             
         except Exception as e:
-            logger.exception("Phase 3 failed")
+            # FULL TRACEBACK LOGGING
+            tb_str = traceback.format_exc()
+            logger.exception(f"Phase 3 failed with full traceback:\n{tb_str}")
+            
             db.update_task(
                 self.task_id,
                 status="failed",
-                error_message=f"Final assembly failed: {str(e)}"
+                error_message=f"Final assembly failed: {str(e)}",
+                error_traceback=tb_str  # Store full traceback
             )
-            raise
+            raise  # Re-raise with full context
     
     async def _separate_background(self):
         """Separate background audio using Demucs."""
@@ -206,7 +211,8 @@ class Phase3Recomposer:
             logger.info(f"Demucs separation complete: {background_path}")
             
         except Exception as e:
-            logger.warning(f"Demucs separation failed: {e}, continuing without background")
+            tb_str = traceback.format_exc()
+            logger.warning(f"Demucs separation failed with traceback:\n{tb_str}, continuing without background")
             self.use_demucs = False
     
     async def _build_speech_track(self) -> str:
@@ -259,7 +265,8 @@ class Phase3Recomposer:
                         seg_audio = librosa.effects.time_stretch(seg_audio, rate=rate)
                         logger.debug(f"Time-stretched segment: {current_duration:.2f}s -> {target_duration:.2f}s")
                     except Exception as e:
-                        logger.warning(f"Time-stretch failed: {e}")
+                        tb_str = traceback.format_exc()
+                        logger.warning(f"Time-stretch failed with traceback:\n{tb_str}")
                 
                 # Ensure we don't overflow
                 end_sample = min(start_sample + len(seg_audio), len(track))
@@ -272,7 +279,8 @@ class Phase3Recomposer:
                 track[start_sample:end_sample] += seg_audio[:actual_len]
                 
             except Exception as e:
-                logger.error(f"Failed to place segment at {seg.start}s: {e}")
+                tb_str = traceback.format_exc()
+                logger.error(f"Failed to place segment at {seg.start}s with traceback:\n{tb_str}")
         
         # Normalize track
         peak = np.max(np.abs(track))
@@ -412,7 +420,9 @@ class Phase3Recomposer:
         
         if returncode != 0:
             stderr_text = stderr.decode('utf-8', errors='replace') if stderr else "Unknown error"
-            raise RuntimeError(f"FFmpeg merge failed: {stderr_text}")
+            error_msg = f"FFmpeg merge failed: {stderr_text}"
+            logger.error(f"FFmpeg failed with return code {returncode}: {stderr_text}")
+            raise RuntimeError(error_msg)
         
         # Verify output exists
         if not self.final_video_path.exists():
@@ -443,7 +453,8 @@ class Phase3Recomposer:
             return duration
             
         except Exception as e:
-            logger.warning(f"Failed to get video duration: {e}, using fallback")
+            tb_str = traceback.format_exc()
+            logger.warning(f"Failed to get video duration with traceback:\n{tb_str}, using fallback")
             # Fallback: estimate from segments
             if self.segments:
                 return max(s.end for s in self.segments) + 1.0
@@ -467,7 +478,8 @@ class Phase3Recomposer:
             try:
                 await self.progress_callback(phase, percent, message)
             except Exception as e:
-                logger.warning(f"Progress callback failed: {e}")
+                tb_str = traceback.format_exc()
+                logger.warning(f"Progress callback failed with traceback:\n{tb_str}")
         
         # Update database
         db.update_task(
@@ -487,7 +499,8 @@ class Phase3Recomposer:
                 }
             })
         except Exception as e:
-            logger.warning(f"WebSocket broadcast failed: {e}")
+            tb_str = traceback.format_exc()
+            logger.warning(f"WebSocket broadcast failed with traceback:\n{tb_str}")
 
 
 async def run_phase3_recomposition(

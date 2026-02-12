@@ -1,3 +1,7 @@
+# ============================================================================
+# CRITICAL: SVML Workaround - MUST be first, before ANY torch/numpy imports
+# ============================================================================
+import os
 import os
 import uvicorn
 import asyncio
@@ -10,6 +14,32 @@ from fastapi.responses import HTMLResponse
 from pathlib import Path
 import signal
 import sys
+
+# CRITICAL FIX: Set environment variables BEFORE any torch/PyTorch imports
+# This prevents LLVM errors with Intel MKL/SVML on Windows
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+# NEW: Disable Intel SVML to prevent LLVM errors on Windows
+os.environ["MKL_ENABLE_INSTRUCTIONS"] = "SSE4_2"  # Disable AVX/AVX2/SVML
+os.environ["NPY_DISABLE_CPU_FEATURES"] = "AVX512F,AVX2,AVX"  # Disable NumPy AVX too
+
+# Disable Intel SVML optimizations that cause crashes on some Windows systems
+try:
+    # This must be set before torch is imported
+    import torch
+    # Disable MKL-DNN if it's causing issues
+    torch.backends.mkldnn.enabled = False
+    # Force single-threaded operation to avoid SVML issues
+    torch.set_num_threads(1)
+    if torch.cuda.is_available():
+        # Ensure CUDA operations don't use CPU fallbacks that might trigger SVML
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+except ImportError:
+    pass
 
 # Import Modules
 from modules.translate_video.endpoints import router as video_router
@@ -58,13 +88,16 @@ async def lifespan(app: FastAPI):
     print("VoiceDub Pro - Starting up...")
     print("=" * 50)
     
-    # Recover interrupted tasks from previous run
-    print("Checking for interrupted tasks...")
-    try:
-        await task_manager.recover_interrupted_tasks()
-    except Exception as e:
-        print(f"Warning: Task recovery failed: {e}")
-        # Continue startup even if recovery fails
+    # Auto-recovery disabled - tasks must be manually resumed from dashboard
+    # To re-enable auto-recovery, uncomment the following block:
+    # 
+    # # Recover interrupted tasks from previous run
+    # print("Checking for interrupted tasks...")
+    # try:
+    #     await task_manager.recover_interrupted_tasks()
+    # except Exception as e:
+    #     print(f"Warning: Task recovery failed: {e}")
+    #     # Continue startup even if recovery fails
     
     # Get shutdown checker
     shutdown_checker = setup_signal_handlers()
