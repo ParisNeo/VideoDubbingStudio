@@ -201,9 +201,111 @@ def generate_speech_fishspeech(
     return audio, 24000
 
 
+def generate_speech_lollms(
+    text: str,
+    voice: Optional[str] = None,
+    model: Optional[str] = None,
+    response_format: str = "mp3",
+    api_url: Optional[str] = None,
+    api_key: Optional[str] = None
+) -> Tuple[np.ndarray, int]:
+    """
+    LoLLMs TTS API-based speech generation.
+    Uses the /lollms/v1/audio/speech endpoint (OpenAI-compatible).
+    """
+    import requests
+    import io
+    import tempfile
+    import subprocess
+    
+    # Get LoLLMs configuration from environment or use defaults
+    url = api_url or os.getenv("LOLLMS_URL", "http://localhost:9600")
+    if not url.endswith("/lollms/v1/audio/speech"):
+        url = url.rstrip("/") + "/lollms/v1/audio/speech"
+    
+    key = api_key or os.getenv("LOLLMS_API_KEY", "")
+    
+    # Available voices (from LoLLMs docs: alloy, echo, fable, onyx, nova, shimmer)
+    voice = voice or "alloy"
+    model = model or "tts-1"  # or "tts-1-hd" for higher quality
+    
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    
+    payload = {
+        "input": text,
+        "voice": voice,
+        "model": model,
+        "response_format": response_format
+    }
+    
+    # Make request to LoLLMs TTS endpoint
+    response = requests.post(url, headers=headers, json=payload, timeout=120)
+    response.raise_for_status()
+    
+    # Response is binary audio data (mp3, opus, aac, flac, wav, or pcm)
+    audio_bytes = response.content
+    
+    # Save to temp file and load with soundfile
+    # Need to convert to WAV for soundfile compatibility if not WAV/FLAC
+    with tempfile.NamedTemporaryFile(suffix=f".{response_format}", delete=False) as tmp_in:
+        tmp_in.write(audio_bytes)
+        tmp_path = tmp_in.name
+    
+    try:
+        # If mp3/opus/aac, convert to wav using ffmpeg if available, otherwise try direct load
+        if response_format in ["mp3", "opus", "aac"]:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+                wav_path = tmp_wav.name
+            
+            # Convert to WAV using ffmpeg
+            try:
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", tmp_path, 
+                    "-ar", "24000", "-ac", "1", 
+                    wav_path
+                ], check=True, capture_output=True)
+                audio, out_sr = sf.read(wav_path)
+                os.unlink(wav_path)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                # Fallback: try to load directly (may fail for mp3)
+                audio, out_sr = sf.read(tmp_path)
+        else:
+            # WAV or FLAC - load directly
+            audio, out_sr = sf.read(tmp_path)
+        
+        # Ensure mono
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)
+        
+        # Resample to 24kHz if needed
+        if out_sr != 24000:
+            audio = librosa.resample(audio, orig_sr=out_sr, target_sr=24000)
+        
+        # Normalize
+        peak = np.max(np.abs(audio))
+        if peak > 0.95:
+            audio = audio / peak * 0.95
+        elif peak < 0.01:
+            # Very quiet audio, boost slightly
+            audio = audio * 0.5 / peak if peak > 0 else audio
+        
+        return audio, 24000
+        
+    finally:
+        # Cleanup temp files
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+
+
 def generate_speech(
     text: str,
-    ref_audio_path: str,
+    ref_audio_path: Optional[str] = None,
     engine: Optional[str] = None,
     device: str = "cuda",
     **kwargs
@@ -213,9 +315,9 @@ def generate_speech(
     
     Args:
         text: Text to synthesize
-        ref_audio_path: Path to reference audio file
-        engine: 'f5', 'fishspeech', or None for platform-aware default
-        device: Preferred compute device (ignored for FishSpeech)
+        ref_audio_path: Path to reference audio file (required for F5/FishSpeech, ignored for LoLLMs)
+        engine: 'f5', 'fishspeech', 'lollms', or None for platform-aware default
+        device: Preferred compute device (ignored for FishSpeech and LoLLMs)
     
     Returns:
         (audio_array, sample_rate)
@@ -227,10 +329,32 @@ def generate_speech(
     engine = engine.lower()
     
     if engine == 'fishspeech':
+        if not ref_audio_path:
+            raise ValueError("FishSpeech requires a reference audio file")
         return generate_speech_fishspeech(text, ref_audio_path, **kwargs)
+    
+    elif engine == 'lollms':
+        # LoLLMs TTS doesn't use voice cloning - it's a standard TTS service
+        # ref_audio_path is ignored, voice can be specified in kwargs
+        voice = kwargs.get('voice', 'alloy')
+        model = kwargs.get('model', 'tts-1')
+        response_format = kwargs.get('response_format', 'mp3')
+        api_url = kwargs.get('api_url')
+        api_key = kwargs.get('api_key')
+        return generate_speech_lollms(
+            text=text,
+            voice=voice,
+            model=model,
+            response_format=response_format,
+            api_url=api_url,
+            api_key=api_key
+        )
     
     elif engine == 'f5':
         from core.resources import manager
+        
+        if not ref_audio_path:
+            raise ValueError("F5-TTS requires a reference audio file")
         
         # Apply SVML protection
         os.environ["MKL_ENABLE_INSTRUCTIONS"] = "SSE4_2"
@@ -253,7 +377,7 @@ def generate_speech(
             raise
     
     else:
-        raise ValueError(f"Unknown TTS engine: {engine}. Use 'f5' or 'fishspeech'.")
+        raise ValueError(f"Unknown TTS engine: {engine}. Use 'f5', 'fishspeech', or 'lollms'.")
 
 
 def get_default_tts_engine() -> str:
@@ -263,9 +387,38 @@ def get_default_tts_engine() -> str:
     
     # Linux/Mac: use F5-TTS if GPU available
     try:
+        import torch
         if torch.cuda.is_available():
             return 'f5'
     except:
         pass
     
     return 'fishspeech'
+
+
+def get_available_voices_lollms(api_url: Optional[str] = None) -> list:
+    """
+    Fetch available voices from LoLLMs TTS service.
+    
+    Returns list of voice names (e.g., ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'])
+    """
+    import requests
+    
+    url = api_url or os.getenv("LOLLMS_URL", "http://localhost:9600")
+    voices_url = url.rstrip("/") + "/lollms/v1/audio/voices"
+    
+    key = os.getenv("LOLLMS_API_KEY", "")
+    headers = {}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    
+    try:
+        response = requests.get(voices_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        # LoLLMs returns OpenAI-compatible format: { "voices": ["alloy", "echo", ...] }
+        return data.get('voices', ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer'])
+    except Exception as e:
+        print(f"[LoLLMs TTS] Could not fetch voices: {e}")
+        # Return standard OpenAI voices as fallback
+        return ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer']

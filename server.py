@@ -2,7 +2,6 @@
 # CRITICAL: SVML Workaround - MUST be first, before ANY torch/numpy imports
 # ============================================================================
 import os
-import os
 import uvicorn
 import asyncio
 from contextlib import asynccontextmanager
@@ -14,6 +13,7 @@ from fastapi.responses import HTMLResponse
 from pathlib import Path
 import signal
 import sys
+import argparse
 
 # CRITICAL FIX: Set environment variables BEFORE any torch/PyTorch imports
 # This prevents LLVM errors with Intel MKL/SVML on Windows
@@ -167,5 +167,46 @@ app.include_router(tts_router)
 async def read_root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="VoiceDub Pro - AI Video Dubbing Platform")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8002,
+        help="Port to run the server on (default: 8002)"
+    )
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Host to bind the server to (default: 0.0.0.0)"
+    )
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+    # Parse command line arguments
+    args = parse_args()
+    
+    # Disable reload on Windows to avoid CUDA/PyTorch fork issues
+    # reload=True causes "RuntimeError: CUDA error: initialization error" on Windows
+    use_reload = sys.platform != 'win32' and not sys.platform.startswith('cygwin')
+    
+    if not use_reload:
+        print("[INFO] Running without reload mode on Windows for CUDA compatibility")
+    
+    print(f"[INFO] Starting VoiceDub Pro on http://{args.host}:{args.port}")
+    
+    try:
+        uvicorn.run(
+            "server:app", 
+            host=args.host, 
+            port=args.port, 
+            reload=use_reload,
+            log_level="info"
+        )
+    except Exception as e:
+        print(f"[FATAL] Failed to start server: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

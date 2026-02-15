@@ -48,15 +48,15 @@ class TTSSubphase:
 
     def __init__(
         self,
-        task_id: str,  # FIXED: was taskid, now task_id
-        tts_engine: str = "f5",  # FIXED: was ttsengine, now tts_engine
-        speaker_config: Optional[Dict[str, Any]] = None,  # FIXED: was speakerconfig, now speaker_config
-        progress_callback: Optional[Callable[[str, int, str], None]] = None  # FIXED: was progresscallback, now progress_callback
+        task_id: str,
+        tts_engine: str = "f5",
+        speaker_config: Optional[Dict[str, Any]] = None,
+        progress_callback: Optional[Callable[[str, int, str], None]] = None
     ):
-        self.task_id = task_id  # FIXED: was self.taskid
-        self.tts_engine = tts_engine.lower()  # FIXED: was self.ttsengine
-        self.speaker_config = speaker_config or {}  # FIXED: was self.speakerconfig
-        self.progress_callback = progress_callback  # FIXED: was self.progresscallback
+        self.task_id = task_id
+        self.tts_engine = tts_engine.lower()
+        self.speaker_config = speaker_config or {}
+        self.progress_callback = progress_callback
 
         # Models (lazy loaded)
         self.f5model = None
@@ -77,19 +77,19 @@ class TTSSubphase:
         self.fishspeechurl = os.getenv("FISHSPEECHAPIURL", "http://127.0.0.1:8080/v1/tts")
 
         # Speaker merge map
-        self.merge_map: Dict[str, str] = {}  # FIXED: was self.mergemap
-        self.build_merge_map()  # FIXED: was self.buildmergemap()
+        self.merge_map: Dict[str, str] = {}
+        self.build_merge_map()
 
         logger.info(f"TTSSubphase initialized engine={self.tts_engine}")
 
-    def build_merge_map(self):  # FIXED: was buildmergemap
+    def build_merge_map(self):
         """Build mapping of merged speakers to master speakers."""
-        for spk_id, info in self.speaker_config.items():  # FIXED: was spkid, speakerconfig
-            merged_into = info.get("merged_into")  # FIXED: was mergedinto
+        for spk_id, info in self.speaker_config.items():
+            merged_into = info.get("merged_into")
             if merged_into:
                 self.merge_map[spk_id] = merged_into
                 logger.info(f"TTS Speaker {spk_id} merged into {merged_into}")
-            merged_speakers = info.get("merged_speakers", [])  # FIXED: was mergedspeakers
+            merged_speakers = info.get("merged_speakers", [])
             if merged_speakers:
                 for merged in merged_speakers:
                     self.merge_map[str(merged)] = spk_id
@@ -97,17 +97,17 @@ class TTSSubphase:
         if self.merge_map:
             logger.info(f"TTS merge map: {self.merge_map}")
 
-    def get_effective_speaker_id(self, speaker_id: int) -> int:  # FIXED: was geteffectivespeakerid
+    def get_effective_speaker_id(self, speaker_id: int) -> int:
         """Get the effective speaker ID after applying merges."""
         spk_str = str(speaker_id)
         return int(self.merge_map.get(spk_str, spk_str))
 
-    def get_effective_action(self, speaker_id: int) -> str:  # FIXED: was geteffectiveaction
+    def get_effective_action(self, speaker_id: int) -> str:
         """Get the effective action for a speaker after applying merges."""
         effective_id = self.get_effective_speaker_id(speaker_id)
         effective_str = str(effective_id)
 
-        if effective_str in self.speaker_config:  # FIXED: was speakerconfig
+        if effective_str in self.speaker_config:
             return self.speaker_config[effective_str].get("action", "dub")
 
         return "dub"  # Default to dub if not found
@@ -121,41 +121,49 @@ class TTSSubphase:
         await self.report_progress("synthesizing", 60, f"Loading {self.tts_engine.upper()} engine for {len(segments)} segments...")
 
         try:
-            await self.load_tts_model()  # FIXED: was loadttsmodel
+            await self.load_tts_model()
 
             total = len(segments)
             for i, ts in enumerate(segments):
-                if ts.status == "failed":
+                if ts.status == 'failed':
                     continue
 
                 try:
-                    effective_action = self.get_effective_action(ts.speaker_id)  # FIXED: ts.speakerid -> ts.speaker_id
-                    if effective_action == "remove":
-                        await self.generate_silence(ts)  # FIXED: generatesilence -> generate_silence
+                    effective_action = self.get_effective_action(ts.speaker_id)
+                    if effective_action == 'remove':
+                        await self.generate_silence(ts)
                         continue
 
-                    effective_speaker_id = self.get_effective_speaker_id(ts.speaker_id)  # FIXED: ts.speakerid -> ts.speaker_id
-                    sample_path = self.resolve_voice_sample_path(effective_speaker_id, self.speaker_config.get(str(effective_speaker_id), {}))  # FIXED: resolvevoicesamplepath
-                    if not sample_path:
-                        sample_path = self.resolve_voice_sample_path(ts.speaker_id, self.speaker_config.get(str(ts.speaker_id), {}))  # FIXED: ts.speakerid -> ts.speaker_id
-                    if not sample_path or not Path(sample_path).exists():
-                        raise ValueError(f"No voice sample found for speaker {ts.speaker_id} (effective: {effective_speaker_id})")
-
-                    await self.log(f"Synthesizing segment {ts.idx} with {self.tts_engine} engine, voice of speaker {effective_speaker_id} (orig {ts.speaker_id})...")  # FIXED: ts.speakerid -> ts.speaker_id
+                    await self.log(f"Synthesizing segment {ts.idx} with {self.tts_engine} engine...")
                     print(f"SEGMENT {ts.idx} SYNTHESIZING with {self.tts_engine.upper()}...")
 
-                    if self.tts_engine == "fishspeech":
-                        audio = await self.generate_tts_fishspeech_local(ts.translated_text, sample_path)  # FIXED: generatettsfishspeechlocal, ts.translatedtext -> ts.translated_text
+                    if self.tts_engine == "lollms":
+                        # LoLLMs TTS doesn't use voice cloning - generate directly
+                        audio = await self.generate_tts_lollms(ts.translated_text, ts.speaker_id)
+                    elif self.tts_engine == "fishspeech":
+                        effective_speaker_id = self.get_effective_speaker_id(ts.speaker_id)
+                        sample_path = self.resolve_voice_sample_path(effective_speaker_id, self.speaker_config.get(str(effective_speaker_id), {}))
+                        if not sample_path:
+                            sample_path = self.resolve_voice_sample_path(ts.speaker_id, self.speaker_config.get(str(ts.speaker_id), {}))
+                        if not sample_path or not Path(sample_path).exists():
+                            raise ValueError(f"No voice sample found for speaker {ts.speaker_id} (effective: {effective_speaker_id})")
+                        audio = await self.generate_tts_fishspeech_local(ts.translated_text, sample_path)
                     else:  # f5
-                        audio = await self.generate_tts_f5_safe(ts.translated_text, sample_path)  # FIXED: generatettsf5safe, ts.translatedtext -> ts.translated_text
+                        effective_speaker_id = self.get_effective_speaker_id(ts.speaker_id)
+                        sample_path = self.resolve_voice_sample_path(effective_speaker_id, self.speaker_config.get(str(effective_speaker_id), {}))
+                        if not sample_path:
+                            sample_path = self.resolve_voice_sample_path(ts.speaker_id, self.speaker_config.get(str(ts.speaker_id), {}))
+                        if not sample_path or not Path(sample_path).exists():
+                            raise ValueError(f"No voice sample found for speaker {ts.speaker_id} (effective: {effective_speaker_id})")
+                        audio = await self.generate_tts_f5_safe(ts.translated_text, sample_path)
 
-                    output_path = self.save_segment_audio(ts, audio)  # FIXED: savesegmentaudio
-                    ts.audio_path = output_path  # FIXED: ts.audiopath -> ts.audio_path
+                    output_path = self.save_segment_audio(ts, audio)
+                    ts.audio_path = output_path
                     ts.status = "completed"
 
-                    db.save_translation_segment(  # FIXED: savetranslationsegment
-                        self.task_id, ts.idx, ts.original_text, ts.translated_text,  # FIXED: taskid -> task_id, originaltext -> original_text, translatedtext -> translated_text
-                        output_path, "completed", ts.start, ts.end, ts.speaker_id  # FIXED: ts.speakerid -> ts.speaker_id
+                    db.save_translation_segment(
+                        self.task_id, ts.idx, ts.original_text, ts.translated_text,
+                        output_path, "completed", ts.start, ts.end, ts.speaker_id
                     )
 
                     print(f"SEGMENT {ts.idx} Synthesis complete - {output_path}")
@@ -174,9 +182,9 @@ class TTSSubphase:
             return segments
 
         finally:
-            self.unload_tts_model()  # FIXED: unloadttsmodel
+            self.unload_tts_model()
 
-    async def load_tts_model(self):  # FIXED: loadttsmodel
+    async def load_tts_model(self):
         """Load TTS model based on engine."""
         if self.loaded:
             return
@@ -184,7 +192,7 @@ class TTSSubphase:
         if self.tts_engine == "f5":
             logger.info("Loading F5-TTS model (VRAM-intensive)...")
             try:
-                self.f5model, self.f5vocoder = manager.get_f5_tts()  # FIXED: getf5tts -> get_f5_tts
+                self.f5model, self.f5vocoder = manager.get_f5_tts()
                 logger.info("F5-TTS loaded")
             except Exception as e:
                 tb_str = traceback.format_exc()
@@ -200,9 +208,43 @@ class TTSSubphase:
             self.fishspeechavailable = True  # Local always "available"
             logger.info("FishSpeech LOCAL ready - checkpoints verified")
 
+        elif self.tts_engine == "lollms":
+            # LoLLMs TTS is API-based, no local model loading needed
+            # Just verify connectivity
+            logger.info("LoLLMs TTS selected (API-based, no local loading)")
+            from modules.tts.logic import get_available_voices_lollms
+            try:
+                voices = get_available_voices_lollms()
+                logger.info(f"LoLLMs TTS available with voices: {voices}")
+            except Exception as e:
+                logger.warning(f"Could not verify LoLLMs TTS connectivity: {e}")
+                # Don't fail - let it try at runtime
+
         self.loaded = True
 
-    async def generate_tts_fishspeech_local(self, text: str, ref_path: str) -> np.ndarray:  # FIXED: generatettsfishspeechlocal
+    async def generate_tts_lollms(self, text: str, speaker_id: int) -> np.ndarray:
+        """
+        Generate TTS audio using LoLLMs service.
+        No voice cloning - uses standard TTS voices.
+        """
+        from modules.tts.logic import generate_speech_lollms, get_available_voices_lollms
+        
+        # Map speakers to different LoLLMs voices for variety
+        voices = ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer']
+        voice = voices[speaker_id % len(voices)]
+        
+        await self.log(f"LoLLMs TTS using voice: {voice}")
+        
+        audio, sr = generate_speech_lollms(
+            text=text,
+            voice=voice,
+            model="tts-1",
+            response_format="mp3"
+        )
+        
+        return audio
+
+    async def generate_tts_fishspeech_local(self, text: str, ref_path: str) -> np.ndarray:
         """Local FishSpeech 3-stage inference (VQGAN → Text2Semantic → DAC)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
@@ -254,7 +296,7 @@ class TTSSubphase:
                 audio = audio / peak * 0.95
             return audio
 
-    async def generate_tts_f5_safe(self, text: str, ref_path: str) -> np.ndarray:  # FIXED: generatettsf5safe
+    async def generate_tts_f5_safe(self, text: str, ref_path: str) -> np.ndarray:
         """F5-TTS with full Intel SVML error handling + retries."""
         ref_audio, sr = sf.read(ref_path)
         if sr != 24000:
@@ -295,27 +337,27 @@ class TTSSubphase:
                 torch.cuda.empty_cache()
                 gc.collect()
 
-    def generate_silence(self, ts: TranslationSegment):  # FIXED: generatesilence
+    def generate_silence(self, ts: TranslationSegment):
         """Generate silence for removed speakers."""
         duration = ts.end - ts.start
         silence = np.zeros(int(duration * 24000))
-        output_path = self.save_segment_audio(ts, silence)  # FIXED: savesegmentaudio
-        ts.audio_path = output_path  # FIXED: ts.audiopath -> ts.audio_path
+        output_path = self.save_segment_audio(ts, silence)
+        ts.audio_path = output_path
         ts.status = "completed"
 
-    def save_segment_audio(self, ts: TranslationSegment, audio: np.ndarray) -> str:  # FIXED: savesegmentaudio
+    def save_segment_audio(self, ts: TranslationSegment, audio: np.ndarray) -> str:
         """Save segment to disk."""
-        outdir = Path("temp/chunks") / self.task_id  # FIXED: taskid -> task_id
+        outdir = Path("temp/chunks") / self.task_id
         outdir.mkdir(parents=True, exist_ok=True)
-        output_path = outdir / f"s{ts.idx}_sp{ts.speaker_id}.wav"  # FIXED: ts.speakerid -> ts.speaker_id
+        output_path = outdir / f"s{ts.idx}_sp{ts.speaker_id}.wav"
         sf.write(output_path, audio, 24000)
         return str(output_path.absolute())
 
-    def resolve_voice_sample_path(self, speaker_id: int, speaker_info: Dict[str, Any] = None) -> Optional[str]:  # FIXED: resolvevoicesamplepath
+    def resolve_voice_sample_path(self, speaker_id: int, speaker_info: Dict[str, Any] = None) -> Optional[str]:
         """Full original resolution logic: base64, paths, temp files."""
         if speaker_info is None:
-            speaker_info = self.speaker_config.get(str(speaker_id), {})  # FIXED: speakerconfig
-        sample_path = speaker_info.get("sample_path")  # FIXED: samplepath -> sample_path
+            speaker_info = self.speaker_config.get(str(speaker_id), {})
+        sample_path = speaker_info.get("sample_path")
         if not sample_path:
             logger.warning(f"No sample_path for speaker {speaker_id}")
             return None
@@ -327,7 +369,7 @@ class TTSSubphase:
                 match = re.match(r'data:audio/wav;base64,(.+)', sample_path)
                 if match:
                     audio_data = base64.b64decode(match.group(1))
-                    temp_path = Path("temp") / "chunks" / self.task_id / f"sp{speaker_id}_ws.wav"  # FIXED: taskid -> task_id
+                    temp_path = Path("temp") / "chunks" / self.task_id / f"sp{speaker_id}_ws.wav"
                     temp_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(temp_path, "wb") as f:
                         f.write(audio_data)
@@ -340,8 +382,8 @@ class TTSSubphase:
         # Direct paths/filenames
         candidates = [
             Path(sample_path),
-            Path("temp/chunks") / self.task_id / f"sp{speaker_id}.wav",  # FIXED: taskid -> task_id
-            Path("uploads") / f"{self.task_id}_sp{speaker_id}.wav",  # FIXED: taskid -> task_id
+            Path("temp/chunks") / self.task_id / f"sp{speaker_id}.wav",
+            Path("uploads") / f"{self.task_id}_sp{speaker_id}.wav",
             Path("temp") / "speaker_samples" / f"sp{speaker_id}_sample.wav"
         ]
         for cand in candidates:
@@ -352,7 +394,7 @@ class TTSSubphase:
         logger.error(f"Could not resolve voice sample for speaker {speaker_id}")
         return None
 
-    def unload_tts_model(self):  # FIXED: unloadttsmodel
+    def unload_tts_model(self):
         """Unload ALL models to free VRAM."""
         if not self.loaded:
             return
@@ -361,9 +403,11 @@ class TTSSubphase:
             logger.info("Unloading F5-TTS...")
             self.f5model = None
             self.f5vocoder = None
-            manager.clear_cache(keep_speaker_encoder=True)  # FIXED: clearcache, keep_speaker_encoder
+            manager.clear_cache(keep_speaker_encoder=True)
         elif self.tts_engine == "fishspeech":
             logger.info("FishSpeech local unloaded (subprocess-based)")
+        elif self.tts_engine == "lollms":
+            logger.info("LoLLMs TTS unloaded (API-based, no local resources)")
 
         self.loaded = False
         self.fish_models_loaded = False
@@ -372,7 +416,7 @@ class TTSSubphase:
             torch.cuda.empty_cache()
         logger.info("TTS model(s) unloaded")
 
-    async def report_progress(self, phase: str, percent: int, message: str):  # FIXED: reportprogress
+    async def report_progress(self, phase: str, percent: int, message: str):
         if self.progress_callback:
             try:
                 await self.progress_callback(phase, percent, message)
@@ -405,10 +449,10 @@ async def run_tts_subphase(
         Updated segments with audio_path populated
     """
     subphase = TTSSubphase(
-        task_id,  # FIXED: was task_id=task_id but now positional
-        tts_engine,  # FIXED: was tts_engine=tts_engine
-        speaker_config,  # FIXED: was speaker_config=speaker_config
-        progress_callback  # FIXED: was progress_callback=progress_callback
+        task_id=task_id,
+        tts_engine=tts_engine,
+        speaker_config=speaker_config,
+        progress_callback=progress_callback
     )
 
     return await subphase.run(segments)
