@@ -16,16 +16,13 @@ const modules = {
 // Global state
 window.appState = {
     currentTaskId: null,
-    currentView: null
+    currentView: 'dashboard'
 };
 
 document.addEventListener('DOMContentLoaded', () => {
-    console.log("%c VoiceDub Pro Modular - Initializing ", 
+    console.log("%c VoiceDub Pro - Initializing ", 
                 "background: #222; color: #bada55; font-size: 14px");
 
-    // Setup navigation first
-    setupNavigation();
-    
     // Initialize all modules
     Object.entries(modules).forEach(([name, mod]) => {
         try {
@@ -38,26 +35,37 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 
-    // Load initial view - use a small delay to ensure DOM is fully ready
+    // Listen for project creation events from the modal
+    window.addEventListener('createProject', (e) => {
+        const projectType = e.detail.type;
+        console.log(`Creating project of type: ${projectType}`);
+        handleProjectCreation(projectType);
+    });
+
+    // Always start with dashboard on fresh load
+    // User's saved preference is only used for in-app navigation, not initial load
     setTimeout(() => {
-        const savedView = localStorage.getItem('vdpu_active_view') || 'dashboard';
-        console.log(`Loading initial view: ${savedView}`);
-        doSwitchView(savedView);
+        doSwitchView('dashboard');
     }, 100);
 });
 
-function setupNavigation() {
-    const navLinks = document.querySelectorAll('.nav-links li[data-view]');
+function handleProjectCreation(type) {
+    const mod = modules[type];
+    if (!mod) {
+        console.error(`Unknown project type: ${type}`);
+        return;
+    }
+
+    // Switch to the appropriate view
+    doSwitchView(type);
     
-    navLinks.forEach(link => {
-        link.addEventListener('click', (e) => {
-            const viewName = link.dataset.view;
-            doSwitchView(viewName);
-        });
-    });
+    // If the module has a new project function, call it
+    if (mod.startNewProject) {
+        mod.startNewProject();
+    }
 }
 
-// Main switch view function - exported for ES modules AND bound to window for inline handlers
+// Main switch view function
 export function doSwitchView(viewName) {
     console.log(`Switching to view: ${viewName}`);
     
@@ -85,18 +93,19 @@ export function doSwitchView(viewName) {
         }
     }
 
-    // Show target view - CRITICAL: Must set display before calling onShow
+    // Show target view
     target.style.display = 'block';
     target.classList.add('active');
 
-    // Update nav active state
-    document.querySelectorAll('.nav-links li').forEach(li => {
-        li.classList.toggle('active', li.dataset.view === viewName);
-    });
-
-    // Update global state BEFORE calling onShow
+    // Update global state
     window.appState.currentView = viewName;
-    localStorage.setItem('vdpu_active_view', viewName);
+
+    // Save to localStorage for in-app navigation persistence
+    try {
+        localStorage.setItem('vdpu_active_view', viewName);
+    } catch (e) {
+        console.warn('Could not save view preference:', e);
+    }
 
     // Trigger module's onShow if exists
     const mod = modules[viewName];
@@ -112,7 +121,11 @@ export function doSwitchView(viewName) {
     console.log(`Switched to view: ${viewName}`);
 }
 
-// CRITICAL: Bind to window for inline onclick handlers in HTML
+// Back to dashboard function for modules
+export function backToDashboard() {
+    doSwitchView('dashboard');
+}
+
+// Bind to window for inline handlers
 window.doSwitchView = doSwitchView;
-// Also provide switchView alias for backward compatibility
-window.switchView = doSwitchView;
+window.backToDashboard = backToDashboard;

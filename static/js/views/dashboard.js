@@ -1,6 +1,4 @@
 import { getJSON, deleteResource, postJSON } from '../api.js';
-
-// Import the switchView function from app.js
 import { doSwitchView } from '../app.js';
 
 // Make functions globally available for inline onclick handlers
@@ -13,7 +11,7 @@ window.newProject = newProject;
 export function init() {
     console.log('Dashboard: init() called');
     
-    // Bind refresh button if it exists
+    // Bind refresh button
     const refreshBtn = document.getElementById('refresh-dash-btn');
     if (refreshBtn) {
         refreshBtn.addEventListener('click', () => {
@@ -22,11 +20,11 @@ export function init() {
         });
     }
     
-    // Bind new project button
+    // Bind new project button - opens the modal
     const newProjectBtn = document.getElementById('new-project-btn');
     if (newProjectBtn) {
         newProjectBtn.addEventListener('click', () => {
-            newProject();
+            openProjectModal();
         });
     }
     
@@ -58,7 +56,7 @@ async function loadTasks() {
     }
 
     // Show loading state
-    grid.innerHTML = '<div class="empty-state"><i class="fas fa-spinner fa-spin"></i> Loading tasks...</div>';
+    grid.innerHTML = '<div class="empty-state"><i class="fas fa-spinner fa-spin"></i> Loading projects...</div>';
 
     try {
         console.log('Dashboard: fetching /api/projects');
@@ -78,7 +76,7 @@ function renderTasks(tasks, container) {
         container.innerHTML = `
             <div class="empty-state">
                 <i class="fas fa-film" style="font-size: 3rem; margin-bottom: 15px; opacity: 0.5;"></i>
-                <p>No projects yet. Start by creating a new project!</p>
+                <p>No projects yet. Click "New Project" to get started!</p>
                 <button class="btn-primary" onclick="newProject()" style="margin-top: 15px;">
                     <i class="fas fa-plus"></i> New Project
                 </button>
@@ -96,58 +94,42 @@ function renderTasks(tasks, container) {
         const date = task.created_at ? 
             new Date(task.created_at * 1000).toLocaleDateString() : 'Unknown';
         
-        // Determine available actions based on status
-        const isActuallyRunning = task.status === 'processing' && !task.was_running_at_shutdown;
-        const canResume = ['paused', 'failed', 'error', 'resuming'].includes(task.status) ||
-                         (task.status === 'processing' && task.was_running_at_shutdown);
-        const canRestart = !['processing', 'queued'].includes(task.status) || task.was_running_at_shutdown;
-        // Allow delete for any task except actively running ones
-        const canDelete = !isActuallyRunning || task.was_running_at_shutdown || ['completed', 'failed', 'error', 'cancelled', 'paused'].includes(task.status);
+        // Determine project type icon
+        const typeIcon = getProjectTypeIcon(task);
+        
+        // Simplified action logic
+        const canMonitor = ['processing', 'queued', 'awaiting_validation'].includes(task.status);
+        const canResume = ['paused', 'failed', 'error'].includes(task.status) || task.was_running_at_shutdown;
         
         // Build action buttons HTML
         let actionButtons = '';
         
         if (task.status === 'completed') {
             actionButtons = `
-                <button class="btn-primary btn-sm" onclick="openTask('${task.task_id}')">
+                <a href="/api/projects/${task.task_id}/download" class="btn-primary btn-sm" title="Download result">
                     <i class="fas fa-download"></i> Download
-                </button>
-                <button class="btn-secondary btn-sm" onclick="restartTask('${task.task_id}')" title="Start over with same video">
-                    <i class="fas fa-redo"></i> Restart
-                </button>
+                </a>
             `;
         } else if (canResume) {
-            const resumeIcon = task.was_running_at_shutdown ? 'fa-play-circle' : 'fa-play';
             const resumeText = task.was_running_at_shutdown ? 'Resume' : 'Retry';
             actionButtons = `
-                <button class="btn-primary btn-sm" onclick="resumeTask('${task.task_id}')">
-                    <i class="fas ${resumeIcon}"></i> ${resumeText}
+                <button class="btn-primary btn-sm" onclick="resumeTask('${task.task_id}')" title="${resumeText} processing">
+                    <i class="fas fa-play"></i> ${resumeText}
                 </button>
-                ${canRestart ? `
-                <button class="btn-secondary btn-sm" onclick="restartTask('${task.task_id}')" title="Start over from beginning">
-                    <i class="fas fa-redo"></i> Restart
-                </button>
-                ` : ''}
             `;
-        } else if (['processing', 'queued'].includes(task.status)) {
+        } else if (canMonitor) {
             actionButtons = `
-                <button class="btn-primary btn-sm" onclick="openTask('${task.task_id}')">
+                <button class="btn-primary btn-sm" onclick="openTask('${task.task_id}')" title="Monitor progress">
                     <i class="fas fa-eye"></i> Monitor
                 </button>
             `;
         } else {
             actionButtons = `
-                <button class="btn-primary btn-sm" onclick="openTask('${task.task_id}')">
-                    <i class="fas fa-folder-open"></i> Open
+                <button class="btn-secondary btn-sm" onclick="openTask('${task.task_id}')" title="View details">
+                    <i class="fas fa-folder-open"></i> View
                 </button>
             `;
         }
-        
-        const deleteButton = canDelete ? `
-            <button class="btn-danger btn-sm" onclick="deleteTask('${task.task_id}', event)" title="Delete project">
-                <i class="fas fa-trash"></i>
-            </button>
-        ` : '';
         
         const interruptedWarning = task.was_running_at_shutdown ? `
             <span class="status-badge attention" title="App was restarted while this task was running">
@@ -155,20 +137,20 @@ function renderTasks(tasks, container) {
             </span>
         ` : '';
         
-        const resumeAttempts = task.resume_attempts > 0 ? `
-            <span style="font-size: 0.75rem; color: var(--text-muted); margin-left: 8px;">
-                (retried ${task.resume_attempts}x)
-            </span>
-        ` : '';
-        
         return `
-            <div class="task-card" data-task-id="${task.task_id}">
+            <div class="task-card" data-task-id="${task.task_id}" data-status="${task.status}">
                 <div class="task-header">
                     <div class="task-title">
-                        <span class="filename" title="${task.filename || 'Untitled'}">${truncate(task.filename || 'Untitled', 30)}</span>
-                        <span class="task-date">${date}${resumeAttempts}</span>
+                        <div class="task-type-row">
+                            ${typeIcon}
+                            <span class="filename" title="${task.filename || 'Untitled'}">${truncate(task.filename || 'Untitled', 35)}</span>
+                        </div>
+                        <span class="task-meta">
+                            <span class="task-date"><i class="far fa-calendar"></i> ${date}</span>
+                            ${task.src_lang && task.tgt_lang ? `<span class="task-langs"><i class="fas fa-language"></i> ${task.src_lang === 'auto' ? 'Auto' : task.src_lang} → ${task.tgt_lang}</span>` : ''}
+                        </span>
                     </div>
-                    <div style="display: flex; gap: 8px; align-items: center;">
+                    <div class="task-badges">
                         ${interruptedWarning}
                         <span class="status-badge ${statusClass}">${formatStatus(task.status)}</span>
                     </div>
@@ -178,21 +160,37 @@ function renderTasks(tasks, container) {
                     <div class="progress-bar">
                         <div class="progress-fill" style="width: ${progressWidth}%"></div>
                     </div>
-                    <span class="progress-text">${progressWidth}%</span>
+                    <div class="progress-info">
+                        <span class="progress-text">${progressWidth}%</span>
+                        <span class="phase-label">${task.phase || 'pending'}</span>
+                    </div>
                 </div>
                 
-                <div class="phase-info">
-                    <span class="phase-label">Phase: ${task.phase || 'unknown'}</span>
-                    ${task.error_message ? `<span class="error-hint" title="${task.error_message}"><i class="fas fa-exclamation-triangle"></i> Error</span>` : ''}
-                </div>
+                ${task.error_message ? `<div class="error-banner"><i class="fas fa-exclamation-circle"></i> ${truncate(task.error_message, 60)}</div>` : ''}
                 
                 <div class="task-actions">
                     ${actionButtons}
-                    ${deleteButton}
+                    <div class="task-actions-secondary">
+                        <button class="btn-danger btn-sm" onclick="deleteTask('${task.task_id}', event)" title="Delete project">
+                            <i class="fas fa-trash"></i>
+                        </button>
+                    </div>
                 </div>
             </div>
         `;
     }).join('');
+}
+
+function getProjectTypeIcon(task) {
+    // Determine icon based on task characteristics
+    if (task.source === 'youtube') {
+        return '<span class="type-icon youtube"><i class="fab fa-youtube"></i></span>';
+    } else if (task.separate_audio) {
+        return '<span class="type-icon audio"><i class="fas fa-music"></i></span>';
+    } else if (task.tts_engine === 'f5' || task.tts_engine === 'fishspeech') {
+        return '<span class="type-icon dub"><i class="fas fa-microphone-alt"></i></span>';
+    }
+    return '<span class="type-icon default"><i class="fas fa-file-video"></i></span>';
 }
 
 function getStatusClass(status) {
@@ -214,7 +212,7 @@ function getStatusClass(status) {
 function formatStatus(status) {
     const map = {
         'awaiting_input': 'Needs Input',
-        'awaiting_validation': 'Review Speakers',
+        'awaiting_validation': 'Review',
         'completed': 'Done',
         'processing': 'Running',
         'queued': 'Queued',
@@ -232,16 +230,12 @@ function truncate(str, maxLen) {
     return str.length > maxLen ? str.slice(0, maxLen - 3) + '...' : str;
 }
 
+// New project - opens the modal (defined in dashboard.html)
 function newProject() {
-    console.log('Dashboard: Creating new project');
-    // Switch to video dub view and ensure fresh state
-    import('./video_dub.js').then(mod => {
-        mod.startNewProject();
-    }).catch(err => {
-        console.error('Failed to load video_dub module:', err);
-        // Fallback: just switch view
-        doSwitchView('video_dub');
-    });
+    // The modal is handled by the global function in dashboard.html
+    if (window.openProjectModal) {
+        window.openProjectModal();
+    }
 }
 
 function openTask(taskId) {
@@ -267,15 +261,9 @@ async function resumeTask(taskId) {
 }
 
 async function restartTask(taskId, fromPhase = null) {
-    const phaseOptions = fromPhase ? '' : `
-    
-Options:
-• From beginning - re-analyze speakers
-• From translation - skip speaker ID (if already done)`;
-    
     const message = fromPhase 
-        ? `Restart this task from ${fromPhase}?`
-        : `Restart this task from the beginning?${phaseOptions}`;
+        ? `Restart this task from ${fromPhase} phase?`
+        : `Restart this task from the beginning?`;
     
     if (!confirm(message)) return;
     
@@ -293,25 +281,46 @@ Options:
 function deleteTask(taskId, event) {
     if (event) event.stopPropagation();
     
-    if (!confirm('Delete this project permanently? This cannot be undone.\n\nNote: If the task appears stuck, deletion will force-stop it.')) return;
+    const confirmMsg = `🗑️ Delete Project\n\nThis will permanently delete this project and all associated files.\n\nIf the task is currently running, it will be force-stopped.\n\nThis action cannot be undone.`;
     
-    console.log(`Attempting to delete task: ${taskId}`);
+    if (!confirm(confirmMsg)) return;
     
-    // Try cancel first (best effort), then delete
-    postJSON(`/api/projects/${taskId}/cancel`, {}).catch(err => {
-        console.log('Cancel before delete failed (expected):', err);
-    }).finally(() => {
-        performDelete(taskId);
-    });
+    console.log(`Force deleting task: ${taskId}`);
+    performDelete(taskId);
 }
 
 async function performDelete(taskId) {
+    // Visual feedback
+    const card = document.querySelector(`.task-card[data-task-id="${taskId}"]`);
+    if (card) {
+        card.style.opacity = '0.5';
+        card.style.pointerEvents = 'none';
+    }
+    
     try {
-        await deleteResource(`/api/projects/${taskId}`);
+        await deleteResource(`/api/projects/${taskId}?force=true`);
         console.log(`Successfully deleted task: ${taskId}`);
-        loadTasks();
+        
+        // Remove card with animation
+        if (card) {
+            card.style.transform = 'translateX(-20px)';
+            card.style.opacity = '0';
+            setTimeout(() => {
+                card.remove();
+                const remaining = document.querySelectorAll('.task-card');
+                if (remaining.length === 0) {
+                    loadTasks();
+                }
+            }, 200);
+        } else {
+            loadTasks();
+        }
     } catch (err) {
         console.error('Delete failed:', err);
-        alert('Delete failed: ' + err.message + '\n\nTry refreshing the page and deleting again.');
+        if (card) {
+            card.style.opacity = '1';
+            card.style.pointerEvents = 'auto';
+        }
+        alert('Delete failed: ' + err.message);
     }
 }

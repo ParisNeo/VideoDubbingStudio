@@ -9,13 +9,30 @@ import time
 import tempfile
 import warnings
 from typing import Tuple, Optional
+from pathlib import Path  # ADDED: Missing import
 import numpy as np
 import soundfile as sf
 import librosa
 
-# Re-apply SVML workaround before any torch operations in this module
-os.environ["MKL_ENABLE_INSTRUCTIONS"] = "SSE4_2"
-os.environ["NPY_DISABLE_CPU_FEATURES"] = "AVX512F,AVX2,AVX"
+# CRITICAL: Re-apply SVML workaround BEFORE any torch import or operation
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+os.environ["MKL_ENABLE_INSTRUCTIONS"] = "SSE4_2"  # Disable AVX/AVX2/SVML
+os.environ["NPY_DISABLE_CPU_FEATURES"] = "AVX512F,AVX2,AVX"  # Disable NumPy AVX
+
+# Only import torch after environment is set
+try:
+    import torch
+    # Disable MKL-DNN and limit threads
+    torch.backends.mkldnn.enabled = False
+    torch.set_num_threads(1)
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+except ImportError:
+    pass
 
 
 def _is_svml_error(error_msg: str) -> bool:
@@ -205,29 +222,51 @@ def generate_speech_lollms(
     text: str,
     voice: Optional[str] = None,
     model: Optional[str] = None,
-    response_format: str = "mp3",
+    response_format: str = "wav",  # Changed default to wav for better compatibility
     api_url: Optional[str] = None,
-    api_key: Optional[str] = None
+    api_key: Optional[str] = None,
+    audio_sample_path: Optional[str] = None,
+    max_retries: int = 2,
 ) -> Tuple[np.ndarray, int]:
     """
     LoLLMs TTS API-based speech generation.
-    Uses the /lollms/v1/audio/speech endpoint (OpenAI-compatible).
+    
+    Uses the OpenAI-compatible /v1/audio/speech endpoint (more reliable than /lollms/v1).
+    Voice cloning is handled via the reference_audio parameter if the endpoint supports it.
+    
+    Args:
+        text: Text to synthesize
+        voice: Voice name (alloy, echo, fable, onyx, nova, shimmer)
+        model: Model name (tts-1, tts-1-hd)
+        response_format: Audio format (wav recommended for direct loading)
+        api_url: LoLLMs API URL (default: http://localhost:9642)
+        api_key: LoLLMs API key
+        audio_sample_path: Path to reference audio for voice cloning (optional)
+        max_retries: Number of retries on failure
+    
+    Returns:
+        (audio_array, sample_rate)
     """
     import requests
     import io
     import tempfile
     import subprocess
+    import base64
+    import time
     
-    # Get LoLLMs configuration from environment or use defaults
-    url = api_url or os.getenv("LOLLMS_URL", "http://localhost:9600")
-    if not url.endswith("/lollms/v1/audio/speech"):
-        url = url.rstrip("/") + "/lollms/v1/audio/speech"
-    
+    # Get LoLLMs configuration
+    base_url = api_url or os.getenv("LOLLMS_URL", "http://localhost:9642")
     key = api_key or os.getenv("LOLLMS_API_KEY", "")
     
-    # Available voices (from LoLLMs docs: alloy, echo, fable, onyx, nova, shimmer)
+    # Try OpenAI-compatible endpoint first (more reliable)
+    # Fall back to /lollms/v1 if needed
+    urls_to_try = [
+        base_url.rstrip("/") + "/v1/audio/speech",  # OpenAI compatible
+        base_url.rstrip("/") + "/lollms/v1/audio/speech",  # LoLLMs native
+    ]
+    
     voice = voice or "alloy"
-    model = model or "tts-1"  # or "tts-1-hd" for higher quality
+    model = model or "tts-1"
     
     headers = {
         "Content-Type": "application/json",
@@ -235,6 +274,7 @@ def generate_speech_lollms(
     if key:
         headers["Authorization"] = f"Bearer {key}"
     
+    # Build OpenAI-compatible payload
     payload = {
         "input": text,
         "voice": voice,
@@ -242,65 +282,116 @@ def generate_speech_lollms(
         "response_format": response_format
     }
     
-    # Make request to LoLLMs TTS endpoint
-    response = requests.post(url, headers=headers, json=payload, timeout=120)
-    response.raise_for_status()
-    
-    # Response is binary audio data (mp3, opus, aac, flac, wav, or pcm)
-    audio_bytes = response.content
-    
-    # Save to temp file and load with soundfile
-    # Need to convert to WAV for soundfile compatibility if not WAV/FLAC
-    with tempfile.NamedTemporaryFile(suffix=f".{response_format}", delete=False) as tmp_in:
-        tmp_in.write(audio_bytes)
-        tmp_path = tmp_in.name
-    
-    try:
-        # If mp3/opus/aac, convert to wav using ffmpeg if available, otherwise try direct load
-        if response_format in ["mp3", "opus", "aac"]:
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
-                wav_path = tmp_wav.name
-            
-            # Convert to WAV using ffmpeg
-            try:
-                subprocess.run([
-                    "ffmpeg", "-y", "-i", tmp_path, 
-                    "-ar", "24000", "-ac", "1", 
-                    wav_path
-                ], check=True, capture_output=True)
-                audio, out_sr = sf.read(wav_path)
-                os.unlink(wav_path)
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                # Fallback: try to load directly (may fail for mp3)
-                audio, out_sr = sf.read(tmp_path)
-        else:
-            # WAV or FLAC - load directly
-            audio, out_sr = sf.read(tmp_path)
-        
-        # Ensure mono
-        if len(audio.shape) > 1:
-            audio = audio.mean(axis=1)
-        
-        # Resample to 24kHz if needed
-        if out_sr != 24000:
-            audio = librosa.resample(audio, orig_sr=out_sr, target_sr=24000)
-        
-        # Normalize
-        peak = np.max(np.abs(audio))
-        if peak > 0.95:
-            audio = audio / peak * 0.95
-        elif peak < 0.01:
-            # Very quiet audio, boost slightly
-            audio = audio * 0.5 / peak if peak > 0 else audio
-        
-        return audio, 24000
-        
-    finally:
-        # Cleanup temp files
+    # Try voice cloning if reference audio provided
+    # Note: This is non-standard extension, may not work with all LoLLMs versions
+    if audio_sample_path and Path(audio_sample_path).exists():
         try:
-            os.unlink(tmp_path)
-        except:
-            pass
+            with open(audio_sample_path, "rb") as f:
+                ref_bytes = f.read()
+                # Some versions accept reference_audio as base64
+                payload["reference_audio"] = base64.b64encode(ref_bytes).decode('utf-8')
+        except Exception as e:
+            print(f"[LoLLMs TTS] Warning: Could not load reference audio: {e}")
+    
+    last_error = None
+    
+    for attempt in range(max_retries):
+        for url in urls_to_try:
+            try:
+                print(f"[LoLLMs TTS] Attempt {attempt + 1}/{max_retries} to {url}")
+                
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
+                
+                # Log error details for debugging
+                if response.status_code != 200:
+                    error_detail = ""
+                    try:
+                        error_detail = response.json()
+                    except:
+                        error_detail = response.text[:500]
+                    print(f"[LoLLMs TTS] Error {response.status_code}: {error_detail}")
+                    continue  # Try next URL
+                
+                # Success - process audio
+                audio_bytes = response.content
+                
+                # Save to temp file
+                with tempfile.NamedTemporaryFile(suffix=f".{response_format}", delete=False) as tmp:
+                    tmp.write(audio_bytes)
+                    tmp_path = tmp.name
+                
+                try:
+                    # Convert to WAV if needed
+                    if response_format in ["mp3", "opus", "aac", "flac"]:
+                        wav_path = tmp_path.replace(f".{response_format}", ".wav")
+                        try:
+                            subprocess.run([
+                                "ffmpeg", "-y", "-i", tmp_path,
+                                "-ar", "24000", "-ac", "1",
+                                wav_path
+                            ], check=True, capture_output=True, timeout=30)
+                            audio, out_sr = sf.read(wav_path)
+                            try:
+                                os.unlink(wav_path)
+                            except:
+                                pass
+                        except Exception as conv_err:
+                            print(f"[LoLLMs TTS] FFmpeg conversion failed: {conv_err}, trying direct load")
+                            audio, out_sr = sf.read(tmp_path)
+                    else:
+                        # WAV/FLAC - load directly
+                        audio, out_sr = sf.read(tmp_path)
+                    
+                    # Ensure mono
+                    if len(audio.shape) > 1:
+                        audio = audio.mean(axis=1)
+                    
+                    # Resample to 24kHz
+                    if out_sr != 24000:
+                        audio = librosa.resample(audio, orig_sr=out_sr, target_sr=24000)
+                    
+                    # Normalize
+                    peak = np.max(np.abs(audio))
+                    if peak > 0.95:
+                        audio = audio / peak * 0.95
+                    elif peak < 0.01 and peak > 0:
+                        audio = audio * 0.5 / peak
+                    
+                    return audio, 24000
+                    
+                finally:
+                    try:
+                        os.unlink(tmp_path)
+                    except:
+                        pass
+                    
+            except requests.exceptions.ConnectionError as e:
+                last_error = f"Connection failed to {url}: {e}"
+                print(f"[LoLLMs TTS] {last_error}")
+                continue  # Try next URL
+            except requests.exceptions.Timeout as e:
+                last_error = f"Timeout connecting to {url}: {e}"
+                print(f"[LoLLMs TTS] {last_error}")
+                continue
+            except Exception as e:
+                last_error = f"Error with {url}: {e}"
+                print(f"[LoLLMs TTS] {last_error}")
+                continue
+        
+        # Exponential backoff before retry
+        if attempt < max_retries - 1:
+            wait_time = 2 ** attempt
+            print(f"[LoLLMs TTS] Retrying in {wait_time}s...")
+            time.sleep(wait_time)
+    
+    # All attempts failed
+    raise RuntimeError(
+        f"LoLLMs TTS failed after {max_retries} attempts. "
+        f"Last error: {last_error}. "
+        f"Please check: 1) LoLLMs is running at {base_url}, "
+        f"2) TTS service is enabled in LoLLMs settings, "
+        f"3) Try using 'f5' or 'fishspeech' engine instead."
+    )
 
 
 def generate_speech(
@@ -315,7 +406,7 @@ def generate_speech(
     
     Args:
         text: Text to synthesize
-        ref_audio_path: Path to reference audio file (required for F5/FishSpeech, ignored for LoLLMs)
+        ref_audio_path: Path to reference audio file (required for F5/FishSpeech/LoLLMs voice cloning)
         engine: 'f5', 'fishspeech', 'lollms', or None for platform-aware default
         device: Preferred compute device (ignored for FishSpeech and LoLLMs)
     
@@ -334,11 +425,11 @@ def generate_speech(
         return generate_speech_fishspeech(text, ref_audio_path, **kwargs)
     
     elif engine == 'lollms':
-        # LoLLMs TTS doesn't use voice cloning - it's a standard TTS service
-        # ref_audio_path is ignored, voice can be specified in kwargs
+        # LoLLMs TTS now supports voice cloning via audio_sample
+        # ref_audio_path is used for voice cloning if provided
         voice = kwargs.get('voice', 'alloy')
         model = kwargs.get('model', 'tts-1')
-        response_format = kwargs.get('response_format', 'mp3')
+        response_format = kwargs.get('response_format', 'wav')  # Use WAV for better quality
         api_url = kwargs.get('api_url')
         api_key = kwargs.get('api_key')
         return generate_speech_lollms(
@@ -347,7 +438,8 @@ def generate_speech(
             model=model,
             response_format=response_format,
             api_url=api_url,
-            api_key=api_key
+            api_key=api_key,
+            audio_sample_path=ref_audio_path,  # Enable voice cloning
         )
     
     elif engine == 'f5':
@@ -378,7 +470,7 @@ def generate_speech(
     
     else:
         raise ValueError(f"Unknown TTS engine: {engine}. Use 'f5', 'fishspeech', or 'lollms'.")
-
+    
 
 def get_default_tts_engine() -> str:
     """Return safe default TTS engine. Windows uses FishSpeech to avoid SVML."""

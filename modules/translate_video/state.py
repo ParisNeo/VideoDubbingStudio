@@ -10,19 +10,11 @@ task_events: Dict[str, Dict[str, asyncio.Event]] = {}
 
 async def connect_task_websocket(task_id: str, websocket: WebSocket):
     """Register a WebSocket connection for a task."""
-    await websocket.accept()
+    # Connection already accepted in endpoint, just register
     if task_id not in active_connections:
         active_connections[task_id] = set()
     active_connections[task_id].add(websocket)
-    
-    # Send current state immediately
-    from core.database import db
-    task = db.get_task(task_id)
-    if task:
-        await websocket.send_json({
-            'type': 'state_sync',
-            'data': task
-        })
+    print(f"WebSocket registered for task {task_id}, total connections: {len(active_connections[task_id])}")
 
 async def disconnect_task_websocket(task_id: str, websocket: WebSocket):
     """Remove a WebSocket connection."""

@@ -8,11 +8,23 @@ window.startNewProject = startNewProject;
 let currentWs = null;
 let currentTaskId = null;
 let downloadedVideoPath = null;
+let downloadedVideoFilename = null;  // Store filename for download
 
 // Speaker merge state
 let speakerMergeState = {
     selected: new Set(),
     groups: [] // Array of arrays: [[0, 2], [1]] means 0&2 merged, 1 separate
+};
+
+// Settings persistence key
+const SETTINGS_KEY = 'voicedub_project_settings';
+
+// Default settings
+const DEFAULT_SETTINGS = {
+    src_lang: 'auto',
+    tgt_lang: 'en',
+    tts_engine: 'f5',
+    separate_audio: false
 };
 
 export function init() {
@@ -28,9 +40,12 @@ export function init() {
     const fileInput = document.getElementById('video-input');
     if (fileInput) fileInput.addEventListener('change', updateFileDisplay);
 
-    // 4. Bind Validation Confirm
+    // 4. Bind Validation Confirm - will be dynamically rebound based on phase
     const startDubBtn = document.getElementById('start-dub-btn');
-    if (startDubBtn) startDubBtn.addEventListener('click', startTranslationPhase);
+    if (startDubBtn) {
+        // Initial binding for transcription review
+        startDubBtn.addEventListener('click', startTranslationPhase);
+    }
     
     // 5. Bind "New Project" button on result page
     const newProjectBtn = document.getElementById('result-new-project-btn');
@@ -46,6 +61,72 @@ export function init() {
     if (applyMergeBtn) {
         applyMergeBtn.addEventListener('click', applySpeakerMerge);
     }
+
+    // 7. Bind settings change listeners for persistence
+    bindSettingsPersistence();
+}
+
+// NEW: Bind settings change listeners to save to localStorage
+function bindSettingsPersistence() {
+    const srcLang = document.getElementById('src-lang');
+    const tgtLang = document.getElementById('tgt-lang');
+    const ttsEngine = document.getElementById('tts-engine');
+    const separateAudio = document.getElementById('separate-audio');
+
+    const saveSettings = () => {
+        const settings = {
+            src_lang: srcLang ? srcLang.value : 'auto',
+            tgt_lang: tgtLang ? tgtLang.value : 'en',
+            tts_engine: ttsEngine ? ttsEngine.value : 'f5',
+            separate_audio: separateAudio ? separateAudio.checked : false
+        };
+        
+        try {
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+            console.log('Settings saved:', settings);
+        } catch (e) {
+            console.warn('Could not save settings:', e);
+        }
+    };
+
+    // Add change listeners
+    if (srcLang) srcLang.addEventListener('change', saveSettings);
+    if (tgtLang) tgtLang.addEventListener('change', saveSettings);
+    if (ttsEngine) ttsEngine.addEventListener('change', saveSettings);
+    if (separateAudio) separateAudio.addEventListener('change', saveSettings);
+}
+
+// NEW: Load saved settings from localStorage
+function loadSavedSettings() {
+    try {
+        const saved = localStorage.getItem(SETTINGS_KEY);
+        if (!saved) {
+            console.log('No saved settings found, using defaults');
+            return DEFAULT_SETTINGS;
+        }
+        
+        const settings = JSON.parse(saved);
+        console.log('Settings loaded:', settings);
+        return { ...DEFAULT_SETTINGS, ...settings };
+    } catch (e) {
+        console.warn('Could not load settings:', e);
+        return DEFAULT_SETTINGS;
+    }
+}
+
+// NEW: Apply loaded settings to form fields
+function applySettingsToForm(settings) {
+    const srcLang = document.getElementById('src-lang');
+    const tgtLang = document.getElementById('tgt-lang');
+    const ttsEngine = document.getElementById('tts-engine');
+    const separateAudio = document.getElementById('separate-audio');
+
+    if (srcLang && settings.src_lang) srcLang.value = settings.src_lang;
+    if (tgtLang && settings.tgt_lang) tgtLang.value = settings.tgt_lang;
+    if (ttsEngine && settings.tts_engine) ttsEngine.value = settings.tts_engine;
+    if (separateAudio && settings.separate_audio !== undefined) {
+        separateAudio.checked = settings.separate_audio;
+    }
 }
 
 export function onShow() {
@@ -54,6 +135,10 @@ export function onShow() {
     // If we have an active task ID, we're in monitor mode - resume monitoring
     if (currentTaskId) {
         loadAndMonitor(currentTaskId);
+    } else {
+        // NEW: Load and apply saved settings when showing the form
+        const settings = loadSavedSettings();
+        applySettingsToForm(settings);
     }
     // Otherwise, the HTML already shows the upload step by default (active class)
     // No need to explicitly call showWizardStep here - let the HTML state persist
@@ -87,7 +172,7 @@ export function startNewProject() {
     const youtubeStatus = document.getElementById('youtube-status');
     if (youtubeStatus) {
         youtubeStatus.style.display = 'none';
-        youtubeStatus.innerText = '';
+        youtubeStatus.innerHTML = '';
     }
     
     const startBtn = document.getElementById('start-btn');
@@ -122,6 +207,10 @@ export function startNewProject() {
     
     // Reset merge UI
     resetMergeUI();
+    
+    // NEW: Load and apply saved settings
+    const settings = loadSavedSettings();
+    applySettingsToForm(settings);
     
     // Show upload step
     showWizardStep('state-upload');
@@ -160,6 +249,30 @@ function showWizardStep(stepId) {
     }
 }
 
+async function downloadYouTubeVideo() {
+    if (!downloadedVideoPath) {
+        alert('No video available to download');
+        return;
+    }
+    
+    try {
+        // Use the backend download endpoint
+        const downloadUrl = `/api/youtube/download-file?file_path=${encodeURIComponent(downloadedVideoPath)}`;
+        
+        // Create temporary link and trigger download
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = downloadedVideoFilename || 'youtube_video.mp4';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+    } catch (err) {
+        console.error('Download failed:', err);
+        alert('Download failed: ' + err.message);
+    }
+}
+
 async function handleYouTubeDownload() {
     const urlInput = document.getElementById('youtube-url');
     const statusEl = document.getElementById('youtube-status');
@@ -179,8 +292,22 @@ async function handleYouTubeDownload() {
         
         if (res.success) {
             downloadedVideoPath = res.file_path;
-            statusEl.innerText = `✅ Downloaded: ${res.title}`;
+            downloadedVideoFilename = res.filename || res.title || 'youtube_video.mp4';
+            statusEl.innerHTML = `
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <span>✅ Downloaded: ${res.title}</span>
+                    <button type="button" id="download-youtube-video-btn" class="btn-secondary btn-sm">
+                        <i class="fas fa-download"></i> Download Video
+                    </button>
+                </div>
+            `;
             statusEl.style.color = 'var(--success)';
+            
+            // Bind download button
+            const downloadBtn = document.getElementById('download-youtube-video-btn');
+            if (downloadBtn) {
+                downloadBtn.addEventListener('click', downloadYouTubeVideo);
+            }
             
             document.getElementById('start-btn').disabled = false;
             document.getElementById('file-display-text').innerText = `Using YouTube: ${res.title}`;
@@ -256,6 +383,7 @@ async function handleUpload(e) {
         
         // Reset downloaded video path after successful upload
         downloadedVideoPath = null;
+        downloadedVideoFilename = null;
         
         openMonitor(data.task_id);
 
@@ -281,20 +409,42 @@ async function loadAndMonitor(taskId) {
 }
 
 function connectWebSocket(taskId) {
+    // Don't close existing connection if it's the same task and still open
     if (currentWs) {
-        currentWs.close();
+        if (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING) {
+            console.log('WebSocket already connected or connecting, skipping new connection');
+            return;
+        }
+        // Only close if it's a different task or already closing/closed
+        try {
+            currentWs.close();
+        } catch (e) {
+            console.log('Error closing old WebSocket:', e);
+        }
         currentWs = null;
     }
     
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    currentWs = new WebSocket(`${proto}//${window.location.host}/ws/${taskId}`);
+    const wsUrl = `${proto}//${window.location.host}/ws/${taskId}`;
+    console.log('Connecting WebSocket to:', wsUrl);
+    
+    currentWs = new WebSocket(wsUrl);
+    let reconnectScheduled = false;
+    
+    currentWs.onopen = () => {
+        console.log('WebSocket connected successfully');
+        reconnectScheduled = false;
+    };
     
     currentWs.onmessage = (e) => {
         try {
             const msg = JSON.parse(e.data);
             console.log('WS message:', msg.type, msg);
             
-            if (msg.type === 'task_progress') {
+            if (msg.type === 'state_sync') {
+                // Initial state received
+                renderTaskState(msg.data);
+            } else if (msg.type === 'task_progress') {
                 updateTaskProgress(msg.data);
             } else if (msg.type === 'status_update') {
                 renderTaskState(msg.data);
@@ -302,8 +452,21 @@ function connectWebSocket(taskId) {
                 updateMainProgress(msg.data);
             } else if (msg.type === 'log') {
                 logToTerm(msg.data.message, msg.data.style);
+            } else if (msg.type === 'pong') {
+                // Keepalive response, no action needed
+            } else if (msg.type === 'transcription_ready') {
+                showTranscriptionReview(msg.data);
+            } else if (msg.type === 'translation_ready') {
+                showTranslationReview(msg.data);
+            } else if (msg.type === 'transcription_validated') {
+                logToTerm('Transcription validated, starting translation...', 'success');
+                // The server is now running translation, we should wait for translation_ready
+                // Don't transition UI yet - wait for translation results
+            } else if (msg.type === 'translation_validated') {
+                // Translation was validated by user, now starting TTS
+                logToTerm('Translation validated, starting voice synthesis...', 'success');
+                showWizardStep('state-processing');
             } else if (msg.type === 'validation_accepted') {
-                // Transition to processing after validation
                 showWizardStep('state-processing');
             }
         } catch (err) {
@@ -313,17 +476,35 @@ function connectWebSocket(taskId) {
     
     currentWs.onerror = (err) => {
         console.error('WebSocket error:', err);
-        logToTerm('Connection error - will retry...', 'error');
+        // Don't show error to user immediately, let onclose handle reconnection
     };
     
-    currentWs.onclose = () => {
-        console.log('WebSocket closed');
-        // Auto-reconnect if we still have an active task and aren't completed
-        if (currentTaskId && !document.getElementById('state-result')?.classList.contains('active')) {
-            setTimeout(() => {
-                if (currentTaskId) connectWebSocket(currentTaskId);
-            }, 2000);
+    currentWs.onclose = (event) => {
+        console.log('WebSocket closed', event.code, event.reason);
+        
+        // Don't reconnect if:
+        // 1. No current task
+        // 2. Task is completed
+        // 3. Already scheduled a reconnect
+        // 4. Normal closure (code 1000 or 1001)
+        const isCompleted = document.getElementById('state-result')?.classList.contains('active');
+        const isNormalClose = event.code === 1000 || event.code === 1001;
+        
+        if (!currentTaskId || isCompleted || reconnectScheduled || isNormalClose) {
+            console.log('Not reconnecting WebSocket:', {currentTaskId, isCompleted, reconnectScheduled, isNormalClose});
+            return;
         }
+        
+        reconnectScheduled = true;
+        logToTerm('Connection lost - reconnecting in 3s...', 'warning');
+        
+        setTimeout(() => {
+            reconnectScheduled = false;
+            if (currentTaskId && currentWs?.readyState !== WebSocket.OPEN) {
+                console.log('Attempting WebSocket reconnect...');
+                connectWebSocket(currentTaskId);
+            }
+        }, 3000);
     };
 }
 
@@ -657,6 +838,311 @@ function updateSpeakerCardsForMerge() {
     });
 }
 
+// NEW: Show transcription review UI
+// NEW: Show transcription review UI
+function showTranscriptionReview(data) {
+    showWizardStep('state-validation');
+    
+    // Update header to indicate transcription review
+    const header = document.querySelector('#state-validation h3');
+    if (header) {
+        header.innerHTML = '<i class="fas fa-file-audio"></i> Review Transcriptions';
+    }
+    
+    // Render editable transcription table
+    const grid = document.getElementById('speaker-grid');
+    if (!grid) return;
+    
+    const segments = data.segments || [];
+    const speakerConfig = data.speaker_config || {};
+    
+    // Group segments by speaker
+    const bySpeaker = {};
+    segments.forEach(seg => {
+        const sid = seg.speaker_id;
+        if (!bySpeaker[sid]) bySpeaker[sid] = [];
+        bySpeaker[sid].push(seg);
+    });
+    
+    // Build review UI
+    let html = '<div class="transcription-review">';
+    html += '<p class="subtitle" style="margin-bottom:20px;">Review and edit what each speaker said. You can correct transcription errors before translation.</p>';
+    
+    Object.entries(bySpeaker).forEach(([sid, segs]) => {
+        const spkInfo = speakerConfig[sid] || { name: `Speaker ${parseInt(sid)+1}` };
+        
+        html += `
+            <div class="speaker-transcription-group" data-speaker="${sid}">
+                <div class="spk-header" style="margin-bottom:15px;">
+                    <span class="avatar">${parseInt(sid) + 1}</span>
+                    <input type="text" class="spk-name" value="${spkInfo.name}" 
+                           style="flex:1; background:var(--bg-panel); border:1px solid var(--border); color:var(--text-main); padding:8px; border-radius:4px;">
+                    <audio controls src="${spkInfo.sample_path}" style="width:200px; margin-left:10px;"></audio>
+                </div>
+                <div class="segments-list">
+        `;
+        
+        segs.forEach((seg, idx) => {
+            const timeStr = formatTime(seg.start) + ' - ' + formatTime(seg.end);
+            html += `
+                <div class="segment-edit-row" data-idx="${seg.idx}" style="margin-bottom:12px; padding:12px; background:var(--bg-main); border-radius:6px; border:1px solid var(--border);">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-size:0.85rem; color:var(--text-muted);">
+                        <span><i class="fas fa-clock"></i> ${timeStr}</span>
+                        <span>Segment ${seg.idx + 1}</span>
+                    </div>
+                    <label style="display:block; margin-bottom:4px; font-size:0.8rem; color:var(--text-muted);">Original Text:</label>
+                    <textarea class="seg-original" data-idx="${seg.idx}" rows="2" 
+                        style="width:100%; background:var(--bg-panel); border:1px solid var(--border); color:var(--text-main); padding:8px; border-radius:4px; margin-bottom:8px; font-family:inherit; resize:vertical;">${seg.original_text || ''}</textarea>
+                    <div style="display:flex; gap:8px; align-items:center;">
+                        <label style="font-size:0.8rem; color:var(--text-muted);">
+                            <input type="checkbox" class="seg-include" checked> Include in dubbing
+                        </label>
+                    </div>
+                </div>
+            `;
+        });
+        
+        html += '</div></div>';
+    });
+    
+    html += '</div>';
+    grid.innerHTML = html;
+    
+    // Update button - CRITICAL FIX: Use event delegation instead of cloning
+    const startBtn = document.getElementById('start-dub-btn');
+    if (startBtn) {
+        // Clear existing handlers by replacing with fresh element
+        const parent = startBtn.parentNode;
+        const freshBtn = document.createElement('button');
+        freshBtn.id = 'start-dub-btn';
+        freshBtn.className = 'btn-success';
+        freshBtn.innerHTML = '<i class="fas fa-language"></i> Translate & Continue';
+        freshBtn.disabled = false;
+        
+        parent.replaceChild(freshBtn, startBtn);
+        
+        // Bind handler
+        freshBtn.addEventListener('click', submitTranscriptionReview);
+    }
+}
+
+// NEW: Show translation review UI
+function showTranslationReview(data) {
+    showWizardStep('state-validation');
+    
+    // Update header
+    const header = document.querySelector('#state-validation h3');
+    if (header) {
+        header.innerHTML = '<i class="fas fa-language"></i> Review Translations';
+    }
+    
+    const grid = document.getElementById('speaker-grid');
+    if (!grid) return;
+    
+    const segments = data.segments || [];
+    const tgtLang = data.target_language || 'en';
+    const srcLang = data.source_language || 'auto';
+    
+    // Group by speaker
+    const bySpeaker = {};
+    segments.forEach(seg => {
+        const sid = seg.speaker_id;
+        if (!bySpeaker[sid]) bySpeaker[sid] = [];
+        bySpeaker[sid].push(seg);
+    });
+    
+    let html = '<div class="translation-review">';
+    html += `<p class="subtitle" style="margin-bottom:20px;">Review and edit translations side-by-side. ${srcLang !== 'auto' ? `Translating from ${srcLang} to ${tgtLang}` : `Auto-detect to ${tgtLang}`}</p>`;
+    
+    Object.entries(bySpeaker).forEach(([sid, segs]) => {
+        html += `
+            <div class="speaker-translation-group" data-speaker="${sid}" style="margin-bottom:20px;">
+                <div style="font-weight:600; margin-bottom:10px; color:var(--accent);">
+                    <i class="fas fa-user"></i> Speaker ${parseInt(sid) + 1}
+                </div>
+        `;
+        
+        segs.forEach(seg => {
+            const timeStr = formatTime(seg.start) + ' - ' + formatTime(seg.end);
+            html += `
+                <div class="translation-edit-row" data-idx="${seg.idx}" style="margin-bottom:12px; padding:12px; background:var(--bg-main); border-radius:6px; border:1px solid var(--border);">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-size:0.85rem; color:var(--text-muted);">
+                        <span><i class="fas fa-clock"></i> ${timeStr}</span>
+                    </div>
+                    <div class="side-by-side-container" style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                        <div class="original-column">
+                            <label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">
+                                <i class="fas fa-file-alt"></i> Original:
+                            </label>
+                            <div class="original-text" style="padding:10px; background:var(--bg-panel); border-radius:4px; color:var(--text-main); font-style:italic; min-height:60px; line-height:1.5;">
+                                ${seg.original_text || '[No text]'}
+                            </div>
+                        </div>
+                        <div class="translation-column">
+                            <label style="display:block; font-size:0.8rem; color:var(--accent); margin-bottom:4px;">
+                                <i class="fas fa-language"></i> Translation (${tgtLang}):
+                            </label>
+                            <textarea class="seg-translated" data-idx="${seg.idx}" rows="3" 
+                                style="width:100%; background:var(--bg-panel); border:1px solid var(--border); color:var(--text-main); padding:10px; border-radius:4px; font-family:inherit; resize:vertical; min-height:60px; line-height:1.5;">${seg.translated_text || ''}</textarea>
+                        </div>
+                    </div>
+                </div>
+            `;
+        });
+        
+        html += '</div>';
+    });
+    
+    html += '</div>';
+    grid.innerHTML = html;
+    
+    // Update button - CRITICAL FIX: Use event delegation instead of cloning
+    const startBtn = document.getElementById('start-dub-btn');
+    if (startBtn) {
+        // Clear existing handlers by replacing with fresh element
+        const parent = startBtn.parentNode;
+        const freshBtn = document.createElement('button');
+        freshBtn.id = 'start-dub-btn';
+        freshBtn.className = 'btn-success';
+        freshBtn.innerHTML = '<i class="fas fa-microphone"></i> Generate Voices';
+        freshBtn.disabled = false;
+        
+        parent.replaceChild(freshBtn, startBtn);
+        
+        // Bind handler
+        freshBtn.addEventListener('click', submitTranslationReview);
+    }
+}
+
+// NEW: Submit transcription review
+// NEW: Submit transcription review
+async function submitTranscriptionReview() {
+    console.log('submitTranscriptionReview called');
+    
+    // Collect edited transcriptions
+    const editedSegments = [];
+    
+    document.querySelectorAll('.segment-edit-row').forEach(row => {
+        const idx = parseInt(row.dataset.idx);
+        const originalText = row.querySelector('.seg-original').value;
+        const include = row.querySelector('.seg-include').checked;
+        
+        // Find speaker ID from parent group
+        const speakerGroup = row.closest('.speaker-transcription-group');
+        const speakerId = speakerGroup ? parseInt(speakerGroup.dataset.speaker) : 0;
+        
+        editedSegments.push({
+            idx: idx,
+            speaker_id: speakerId,
+            original_text: originalText,
+            include: include,
+            // Preserve timing info - will be filled from original
+        });
+    });
+    
+    // Also collect speaker config updates
+    const speakers = {};
+    document.querySelectorAll('.speaker-transcription-group').forEach(group => {
+        const sid = group.dataset.speaker;
+        const nameInput = group.querySelector('.spk-name');
+        speakers[sid] = {
+            name: nameInput ? nameInput.value : `Speaker ${parseInt(sid)+1}`,
+            action: 'dub'  // Default, can be changed
+        };
+    });
+    
+    console.log(`Collected ${editedSegments.length} edited segments, ${Object.keys(speakers).length} speakers`);
+    
+    // Get the button - it may have been replaced, so find it fresh
+    const btn = document.getElementById('start-dub-btn');
+    if (!btn) {
+        console.error('Translate & Continue button not found!');
+        alert('Error: Button not found');
+        return;
+    }
+    
+    const originalContent = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting Translation...';
+    
+    try {
+        console.log(`Sending validate request for task ${currentTaskId}`);
+        const response = await postJSON(`/api/projects/${currentTaskId}/validate`, { 
+            speakers: speakers,
+            edited_segments: editedSegments,
+            proceed_to_translation: true
+        });
+        console.log('validate response:', response);
+        
+        // Show processing state while waiting for translation to complete
+        showWizardStep('state-processing');
+        logToTerm('Translation in progress...', 'info');
+        
+        // WebSocket will send translation_ready when complete
+    } catch(err) {
+        console.error('Transcription validation error:', err);
+        alert("Error: " + err.message);
+        logToTerm(`Validation error: ${err.message}`, 'error');
+        btn.disabled = false;
+        btn.innerHTML = originalContent;
+    }
+}
+
+// NEW: Submit translation review
+async function submitTranslationReview() {
+    console.log('submitTranslationReview called');
+    
+    // Collect edited translations
+    const editedSegments = [];
+    
+    document.querySelectorAll('.translation-edit-row').forEach(row => {
+        const idx = parseInt(row.dataset.idx);
+        const translatedText = row.querySelector('.seg-translated').value;
+        const originalText = row.querySelector('.original-text').textContent.trim();
+        
+        editedSegments.push({
+            idx: idx,
+            original_text: originalText,
+            translated_text: translatedText
+        });
+    });
+    
+    console.log(`Collected ${editedSegments.length} edited segments`);
+    
+    // Get the button - it may have been replaced, so find it fresh
+    const btn = document.getElementById('start-dub-btn');
+    if (!btn) {
+        console.error('Generate Voices button not found!');
+        alert('Error: Button not found');
+        return;
+    }
+    
+    const originalContent = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting Voice Synthesis...';
+    
+    try {
+        console.log(`Sending validate-translation request for task ${currentTaskId}`);
+        // Send flat structure - the backend will handle it
+        const response = await postJSON(`/api/projects/${currentTaskId}/validate-translation`, { 
+            edited_segments: editedSegments,
+            proceed_to_tts: true
+        });
+        console.log('validate-translation response:', response);
+        
+        // WebSocket will handle transition to processing
+        showWizardStep('state-processing');
+        logToTerm('Voice synthesis starting...', 'info');
+    } catch(err) {
+        console.error('Translation validation error:', err);
+        alert("Error: " + err.message);
+        logToTerm(`Translation validation error: ${err.message}`, 'error');
+        btn.disabled = false;
+        btn.innerHTML = originalContent;
+    }
+}
+
+// Legacy function - kept for compatibility
 function renderSpeakerConfig(config) {
     const grid = document.getElementById('speaker-grid');
     if(!grid) return;
@@ -696,6 +1182,15 @@ function renderSpeakerConfig(config) {
     
     // Re-apply merge styling
     updateSpeakerCardsForMerge();
+}
+
+// Helper for time formatting
+function formatTime(seconds) {
+    if (!seconds || isNaN(seconds)) return '00:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    const ms = Math.floor((seconds % 1) * 100);
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
 }
 
 async function startTranslationPhase() {

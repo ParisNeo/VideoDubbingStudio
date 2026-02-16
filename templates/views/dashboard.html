@@ -2,11 +2,11 @@
     <header>
         <div class="header-row">
             <div>
-                <h1>Project Dashboard</h1>
-                <p class="subtitle">Manage and monitor your video dubbing projects. Interrupted tasks can be resumed after app restart.</p>
+                <h1><i class="fas fa-layer-group"></i> VoiceDub Pro</h1>
+                <p class="subtitle">Your AI-powered audio and video processing workspace</p>
             </div>
             <div class="header-actions">
-                <button id="new-project-btn" class="btn-primary" title="Create new dubbing project">
+                <button id="new-project-btn" class="btn-primary btn-lg" title="Create new project">
                     <i class="fas fa-plus"></i> New Project
                 </button>
                 <button id="refresh-dash-btn" class="btn-icon" title="Refresh">
@@ -18,7 +18,298 @@
     <div id="task-grid" class="task-grid">
         <div class="empty-state">
             <i class="fas fa-spinner fa-spin" style="font-size: 2rem; margin-bottom: 16px;"></i>
-            <p>Loading tasks...</p>
+            <p>Loading projects...</p>
         </div>
     </div>
 </div>
+
+<!-- Project Type Selector Modal -->
+<div id="project-type-modal" class="modal-overlay" style="display: none;">
+    <div class="modal-content project-selector">
+        <div class="modal-header">
+            <h2><i class="fas fa-magic"></i> Create New Project</h2>
+            <p class="subtitle">Choose what you want to create</p>
+            <button class="modal-close" onclick="closeProjectModal()"><i class="fas fa-times"></i></button>
+        </div>
+        
+        <div class="project-types-grid">
+            <div class="project-type-card" onclick="createProject('video_dub')">
+                <div class="type-icon"><i class="fas fa-video"></i></div>
+                <h3>Video Dubbing</h3>
+                <p>Translate and dub videos with AI voice cloning. Perfect for multilingual content.</p>
+                <div class="type-features">
+                    <span><i class="fas fa-check"></i> Speaker ID</span>
+                    <span><i class="fas fa-check"></i> Voice Cloning</span>
+                    <span><i class="fas fa-check"></i> Auto-sync</span>
+                </div>
+            </div>
+            
+            <div class="project-type-card" onclick="createProject('transcribe')">
+                <div class="type-icon"><i class="fas fa-file-audio"></i></div>
+                <h3>Transcription</h3>
+                <p>Convert speech to text with optional translation. Great for subtitles and notes.</p>
+                <div class="type-features">
+                    <span><i class="fas fa-check"></i> Whisper AI</span>
+                    <span><i class="fas fa-check"></i> Timestamps</span>
+                    <span><i class="fas fa-check"></i> Translation</span>
+                </div>
+            </div>
+            
+            <div class="project-type-card" onclick="createProject('analysis')">
+                <div class="type-icon"><i class="fas fa-chart-pie"></i></div>
+                <h3>AI Analysis</h3>
+                <p>Generate meeting summaries and reports from audio recordings.</p>
+                <div class="type-features">
+                    <span><i class="fas fa-check"></i> Summarization</span>
+                    <span><i class="fas fa-check"></i> Action Items</span>
+                    <span><i class="fas fa-check"></i> Export</span>
+                </div>
+            </div>
+            
+            <div class="project-type-card" onclick="createProject('recorder')">
+                <div class="type-icon"><i class="fas fa-microphone"></i></div>
+                <h3>Voice Recorder</h3>
+                <p>Record audio directly in your browser with real-time visualization.</p>
+                <div class="type-features">
+                    <span><i class="fas fa-check"></i> Browser-based</span>
+                    <span><i class="fas fa-check"></i> Visualizer</span>
+                    <span><i class="fas fa-check"></i> Instant save</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="modal-footer">
+            <button class="btn-secondary" onclick="closeProjectModal()">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<style>
+/* Modal Styles */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(13, 17, 23, 0.9);
+    backdrop-filter: blur(8px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 20px;
+    animation: fadeIn 0.2s ease-out;
+}
+
+.modal-content {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    max-width: 900px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+    animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.modal-header {
+    padding: 24px 28px;
+    border-bottom: 1px solid var(--border);
+    position: relative;
+}
+
+.modal-header h2 {
+    margin: 0 0 8px 0;
+    font-size: 1.5rem;
+    color: var(--text-main);
+}
+
+.modal-close {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    background: var(--bg-hover);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+}
+
+.modal-close:hover {
+    background: var(--danger);
+    color: white;
+    border-color: var(--danger);
+}
+
+.project-types-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 16px;
+    padding: 24px 28px;
+}
+
+@media (max-width: 600px) {
+    .project-types-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+.project-type-card {
+    background: var(--bg-card);
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-align: center;
+}
+
+.project-type-card:hover {
+    border-color: var(--accent);
+    background: rgba(88, 166, 255, 0.05);
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(88, 166, 255, 0.15);
+}
+
+.type-icon {
+    width: 64px;
+    height: 64px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 16px;
+    font-size: 1.75rem;
+    color: white;
+}
+
+.project-type-card h3 {
+    margin: 0 0 12px 0;
+    font-size: 1.25rem;
+    color: var(--text-main);
+}
+
+.project-type-card > p {
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    margin: 0 0 16px 0;
+    line-height: 1.5;
+}
+
+.type-features {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: center;
+}
+
+.type-features span {
+    background: var(--bg-panel);
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+}
+
+.type-features span i {
+    color: var(--success);
+    margin-right: 4px;
+}
+
+.modal-footer {
+    padding: 20px 28px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: flex-end;
+}
+
+.btn-lg {
+    padding: 12px 24px;
+    font-size: 1rem;
+}
+
+/* Full width layout without sidebar */
+.app-wrapper.no-sidebar #content {
+    margin-left: 0;
+    padding: 32px 40px;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+.app-wrapper.no-sidebar {
+    display: block;
+}
+
+/* Enhanced header for standalone look */
+#view-dashboard header {
+    margin-bottom: 32px;
+}
+
+#view-dashboard .header-row {
+    align-items: center;
+}
+
+#view-dashboard h1 {
+    font-size: 2rem;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+#view-dashboard h1 i {
+    color: var(--accent);
+}
+</style>
+
+<script>
+// Modal control functions
+window.openProjectModal = function() {
+    const modal = document.getElementById('project-type-modal');
+    if (modal) {
+        modal.style.display = 'flex';
+        document.body.style.overflow = 'hidden';
+    }
+};
+
+window.closeProjectModal = function() {
+    const modal = document.getElementById('project-type-modal');
+    if (modal) {
+        modal.style.display = 'none';
+        document.body.style.overflow = '';
+    }
+};
+
+window.createProject = function(type) {
+    closeProjectModal();
+    // Dispatch event for the module to handle
+    window.dispatchEvent(new CustomEvent('createProject', { detail: { type } }));
+};
+
+// Close on backdrop click
+document.addEventListener('click', function(e) {
+    if (e.target.classList.contains('modal-overlay')) {
+        closeProjectModal();
+    }
+});
+
+// Close on Escape key
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        closeProjectModal();
+    }
+});
+</script>

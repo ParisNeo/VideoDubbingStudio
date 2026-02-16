@@ -1,56 +1,68 @@
 """
-Video Translation Pipeline - Modular Phase Implementation
+Video Translation Pipeline - Consolidated Phase Implementation
 
-This package contains the phase-by-phase implementation of the video translation pipeline:
-- Phase 1: Speaker Identification (diarization) - now in pipeline folder
-  - phase1_diarization.py: Main orchestrator
-  - phase1_models.py: Shared data classes
-- Phase 2: Translation - split into 3 subphases:
-  - phase2_subphase1_transcription.py: Whisper STT
-  - phase2_subphase2_translation.py: Lollms text translation  
-  - phase2_subphase3_tts.py: F5-TTS/FishSpeech voice synthesis
-  - phase2_translation.py: Orchestrator that calls all 3 subphases
-  - phase2_models.py: Shared TranslationSegment dataclass
-- Phase 3: Recomposition (final video assembly) - in phase3_recomposition.py
+This package contains the three main phases of video translation:
+- Phase 1: Audio Extraction & Speaker Identification (phase1_diarization.py)
+- Phase 2: Translation & TTS Synthesis (phase2_translation.py)
+- Phase 3: Final Video Assembly (phase3_recomposition.py)
 
-Each subphase is self-contained with clear inputs/outputs for resumability
-and VRAM-efficient model loading/unloading.
+Each phase is self-contained with clear checkpoint boundaries:
+- Phase 1 checkpoints: after diarization, after transcription
+- Phase 2 checkpoints: after translation, after each TTS batch
+- Phase 3 checkpoints: after speech track, after audio mix
 """
 
-# Phase 1 exports
-from .phase1_diarization import run_phase1_diarization, Phase1Diarizer
-from .phase1_models import DiarizationResult, SpeechSegment
+from .phase1_diarization import (
+    run_phase1,
+    DiarizationResult,
+    SpeechSegment,
+    extract_audio,
+    run_vad,
+    SpeakerIdentifier,
+    extract_speaker_samples,
+    transcribe_segments
+)
 
-# Phase 2 exports
-from .phase2_translation import run_phase2_translation, Phase2TranslationPipeline
-from .phase2_models import TranslationSegment
+from .phase2_translation import (
+    run_phase2,
+    TranslationResult,
+    TranslationSegment,
+    TranslationEngine,
+    TTSEngine
+)
 
-# Phase 3 exports
-from .phase3_recomposition import run_phase3_recomposition, Phase3Recomposer
-
-# Subphase exports (for advanced use)
-from .phase2_subphase1_transcription import run_transcription_subphase, TranscriptionSubphase
-from .phase2_subphase2_translation import run_translation_subphase, TranslationSubphase
-from .phase2_subphase3_tts import run_tts_subphase, TTSSubphase
+from .phase3_recomposition import (
+    run_phase3,
+    AudioSegment,
+    build_speech_track,
+    mix_audio_tracks,
+    merge_with_video,
+    separate_background_demucs
+)
 
 __all__ = [
     # Phase 1
-    'run_phase1_diarization',
-    'Phase1Diarizer',
+    'run_phase1',
     'DiarizationResult',
     'SpeechSegment',
+    'extract_audio',
+    'run_vad',
+    'SpeakerIdentifier',
+    'extract_speaker_samples',
+    'transcribe_segments',
+    
     # Phase 2
-    'run_phase2_translation',
-    'Phase2TranslationPipeline',
+    'run_phase2',
+    'TranslationResult',
     'TranslationSegment',
+    'TranslationEngine',
+    'TTSEngine',
+    
     # Phase 3
-    'run_phase3_recomposition',
-    'Phase3Recomposer',
-    # Subphases
-    'run_transcription_subphase',
-    'TranscriptionSubphase',
-    'run_translation_subphase',
-    'TranslationSubphase',
-    'run_tts_subphase',
-    'TTSSubphase',
+    'run_phase3',
+    'AudioSegment',
+    'build_speech_track',
+    'mix_audio_tracks',
+    'merge_with_video',
+    'separate_background_demucs',
 ]

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VoiceDub Pro Modular</title>
+    <title>VoiceDub Pro</title>
     
     <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
@@ -19,34 +19,9 @@
 </head>
 <body>
 
-<div class="app-wrapper">
-    <!-- SIDEBAR -->
-    <nav id="sidebar">
-        <div class="brand">
-            <i class="fas fa-layer-group"></i> VoiceDub
-        </div>
-        
-        <ul class="nav-links">
-            <li data-view="dashboard" class="active">
-                <i class="fas fa-home"></i> Dashboard
-            </li>
-            <li data-view="video_dub">
-                <i class="fas fa-video"></i> Video Dubbing
-            </li>
-            <li data-view="transcribe">
-                <i class="fas fa-file-audio"></i> Transcribe
-            </li>
-            <li data-view="analysis">
-                <i class="fas fa-chart-pie"></i> Analysis
-            </li>
-            <li data-view="recorder">
-                <i class="fas fa-microphone"></i> Recorder
-            </li>
-        </ul>
-    </nav>
-
-    <!-- MAIN CONTENT -->
-    <main id="content">
+<div class="app-wrapper no-sidebar">
+    <!-- MAIN CONTENT - Full Width -->
+    <main id="content" class="full-width">
         <!-- Dashboard View -->
         {% include 'views/dashboard.html' %}
         

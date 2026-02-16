@@ -1,64 +1,45 @@
 """
-Granular Workflow Task System
+Workflow package - simplified to direct pipeline calls.
 
-This package provides a task-based workflow engine where each phase is
-decomposed into discrete, single-responsibility tasks that can be
-tracked, resumed, and debugged individually.
+This package now just re-exports from the pipeline modules.
 """
 
-from .task_definitions import (
-    TaskDefinition,
-    TaskRegistry,
-    WorkflowBuilder,
-    TaskType,
-    TaskResult,
-    TaskContext
+# Import directly from pipeline
+from ..pipeline.phase1_diarization import (
+    run_phase1,
+    DiarizationResult,
+    SpeechSegment,
 )
 
-from .task_executor import TaskExecutor, TaskExecutionError
+from ..pipeline.phase2_translation import (
+    run_phase2,
+    TranslationResult,
+    TranslationSegment,
+    TranslationEngine,
+    TTSEngine,
+)
 
-from .tasks import (
-    # Phase 1 tasks
-    ExtractAudioTask,
-    RunVADTask,
-    ExtractEmbeddingsTask,
-    ClusterSpeakersTask,
-    ExtractSpeakerSamplesTask,
-    TranscribeSegmentsTask,
-    
-    # Phase 2 tasks
-    TranslateSegmentTask,
-    SynthesizeSegmentTask,
-    
-    # Phase 3 tasks
-    SeparateBackgroundAudioTask,
-    BuildSpeechTrackTask,
-    MixAudioTracksTask,
-    MergeVideoTask
+from ..pipeline.phase3_recomposition import (
+    run_phase3,
+    AudioSegment,
 )
 
 __all__ = [
-    # Core classes
-    'TaskDefinition',
-    'TaskRegistry',
-    'WorkflowBuilder',
-    'TaskType',
-    'TaskResult',
-    'TaskContext',
-    'TaskExecutor',
-    'TaskExecutionError',
+    # Phase 1
+    'run_phase1',
+    'DiarizationResult',
+    'SpeechSegment',
     
-    # Task implementations
-    'ExtractAudioTask',
-    'RunVADTask',
-    'ExtractEmbeddingsTask',
-    'ClusterSpeakersTask',
-    'ExtractSpeakerSamplesTask',
-    'TranscribeSegmentsTask',
-    'TranslateSegmentTask',
-    'SynthesizeSegmentTask',
-    'SeparateBackgroundAudioTask',
-    'BuildSpeechTrackTask',
-    'MixAudioTracksTask',
-    'MergeVideoTask'
+    # Phase 2
+    'run_phase2',
+    'TranslationResult',
+    'TranslationSegment',
+    'TranslationEngine',
+    'TTSEngine',
+    
+    # Phase 3
+    'run_phase3',
+    'AudioSegment',
 ]
+```delete
+modules/translate_video/workflow/task_definitions.py
