@@ -21,12 +21,15 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+html, body {
+    height: 100%;
+    overflow: hidden; /* Prevent body scroll, handle in containers */
+}
+
 body {
     background-color: var(--bg-main);
     color: var(--text-main);
     font-family: var(--font-ui);
-    height: 100vh;
-    overflow: hidden;
 }
 
 /* LAYOUT - No Sidebar Version */
@@ -34,6 +37,7 @@ body {
     display: flex;
     height: 100vh;
     width: 100vw;
+    overflow: hidden;
 }
 
 .app-wrapper.no-sidebar {
@@ -46,6 +50,8 @@ body {
     max-width: 1400px;
     margin: 0 auto;
     width: 100%;
+    height: 100vh;
+    overflow-y: auto; /* Enable vertical scrolling */
 }
 
 /* Remove sidebar styles - no longer needed */
@@ -55,15 +61,18 @@ body {
 
 #content {
     flex: 1;
-    overflow-y: auto;
+    overflow-y: auto; /* Enable vertical scrolling */
+    overflow-x: hidden;
     padding: 32px 40px;
     min-width: 0;
+    height: 100vh;
 }
 
 /* VIEW MANAGEMENT */
 .view-section { 
     display: none;
-    animation: fadeIn 0.25s ease-out; 
+    animation: fadeIn 0.25s ease-out;
+    min-height: 100%; /* Ensure content can scroll */
 }
 
 .view-section.active {
@@ -238,6 +247,8 @@ header h1 i {
     display: grid; 
     grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); 
     gap: 20px; 
+    overflow-y: auto;
+    max-height: calc(100vh - 200px);
 }
 
 @media (max-width: 900px) {
@@ -507,6 +518,8 @@ header h1 i {
 /* WIZARD STEPS */
 .wizard-container {
     max-width: 1200px;
+    overflow-y: auto;
+    max-height: calc(100vh - 150px);
 }
 
 .wizard-step {
@@ -523,6 +536,8 @@ header h1 i {
     display: flex;
     flex-direction: column;
     gap: 20px;
+    overflow-y: auto;
+    max-height: calc(100vh - 150px);
 }
 
 .status-card {
@@ -565,6 +580,8 @@ header h1 i {
     border-radius: 8px;
     font-family: var(--font-code); 
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
 }
 
 .terminal-window.large-term {
@@ -580,10 +597,13 @@ header h1 i {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-shrink: 0;
 }
 
 .log-content {
-    height: 280px; 
+    flex: 1;
+    min-height: 200px;
+    max-height: 400px;
     padding: 16px; 
     overflow-y: auto; 
     font-size: 0.85rem;
@@ -591,7 +611,8 @@ header h1 i {
 }
 
 .log-content.small {
-    height: 200px;
+    min-height: 150px;
+    max-height: 250px;
 }
 
 .log-line {
@@ -654,10 +675,11 @@ header h1 i {
     gap: 16px; 
 }
 
-/* TRANSCRIPTION & TRANSLATION REVIEW UI */
+/* TRANSCRIPTION & TRANSLATION REVIEW UI - ENHANCED FOR 100% WIDTH */
 .transcription-review,
 .translation-review {
     width: 100%;
+    max-width: 100%;
 }
 
 .speaker-transcription-group,
@@ -667,11 +689,13 @@ header h1 i {
     border-radius: 8px;
     padding: 16px;
     margin-bottom: 16px;
+    width: 100%;
 }
 
 .segment-edit-row,
 .translation-edit-row {
     transition: border-color 0.2s;
+    width: 100%;
 }
 
 .segment-edit-row:focus-within,
@@ -695,12 +719,14 @@ header h1 i {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 12px;
+    width: 100%;
 }
 
 .side-by-side-container .original-column,
 .side-by-side-container .translation-column {
     display: flex;
     flex-direction: column;
+    min-width: 0; /* Prevent flex overflow */
 }
 
 .side-by-side-container .original-text {
@@ -879,6 +905,8 @@ header h1 i {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    max-height: 300px;
+    overflow-y: auto;
 }
 
 .recording-item {
@@ -973,8 +1001,9 @@ header h1 i {
     display: none;
 }
 
+/* ENHANCED TRANSCRIPTION FIELD - 100% WIDTH */
 .text-area-output {
-    width: 100%;
+    width: 100%; 
     min-height: 200px;
     background: var(--bg-main);
     border: 1px solid var(--border);
@@ -985,6 +1014,40 @@ header h1 i {
     font-size: 0.9rem;
     line-height: 1.6;
     resize: vertical;
+    box-sizing: border-box;
+}
+
+/* Transcription textarea specifically */
+.transcription-field,
+.transcription-review textarea,
+.translation-review textarea,
+.seg-original,
+.seg-translated {
+    width: 100%;
+    max-width: 100%;
+    min-width: 100%;
+    box-sizing: border-box;
+    background: var(--bg-main);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    padding: 12px;
+    border-radius: 6px;
+    font-family: var(--font-ui);
+    font-size: 0.95rem;
+    line-height: 1.6;
+    resize: vertical;
+}
+
+/* Ensure parent containers don't constrain width */
+.speaker-transcription-group .segments-list,
+.speaker-translation-group .segments-list {
+    width: 100%;
+}
+
+.segment-edit-row,
+.translation-edit-row {
+    width: 100%;
+    box-sizing: border-box;
 }
 
 /* HEADER ACTIONS */
@@ -1196,6 +1259,8 @@ header h1 i {
     display: flex;
     flex-direction: column;
     gap: 0;
+    max-height: 400px;
+    overflow-y: auto;
 }
 
 .task-chain-container::before {
@@ -1293,6 +1358,7 @@ header h1 i {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    min-width: 0;
 }
 
 .node-title {
@@ -1418,6 +1484,9 @@ header h1 i {
 /* Stacked layout */
 .stacked-view {
     width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
 }
 
 .stacked-view .card,
@@ -1426,5 +1495,132 @@ header h1 i {
 }
 
 .large-term {
-    height: 400px !important;
+    min-height: 300px !important;
+    max-height: 500px !important;
+}
+
+/* Granular task list container */
+.task-list-card {
+    max-height: 450px;
+    overflow-y: auto;
+}
+
+/* Segments list scrollable */
+.segments-list {
+    max-height: 500px;
+    overflow-y: auto;
+    padding-right: 8px;
+}
+
+/* Custom scrollbar styling */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-main);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: var(--text-muted);
+}
+
+/* Focus styles for accessibility */
+textarea:focus,
+input:focus,
+select:focus {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* Checkbox styling */
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
+}
+
+/* Checkmark custom styling */
+.checkmark {
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--border);
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+}
+
+.checkbox-label input:checked + .checkmark {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.checkbox-label input:checked + .checkmark::after {
+    content: '\2713';
+    color: white;
+    font-size: 12px;
+}
+
+.checkbox-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+/* Loading state */
+.loading {
+    opacity: 0.7;
+    pointer-events: none;
+}
+
+/* Toast notification */
+.toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    z-index: 1000;
+    animation: slideIn 0.3s ease-out;
+}
+
+.toast.success {
+    border-left: 4px solid var(--success);
+}
+
+.toast.error {
+    border-left: 4px solid var(--danger);
+}
+
+@keyframes slideIn {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
 }
