@@ -41,5 +41,4 @@ __all__ = [
     'run_phase3',
     'AudioSegment',
 ]
-```delete
-modules/translate_video/workflow/task_definitions.py
+
