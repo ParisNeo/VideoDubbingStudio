@@ -271,10 +271,11 @@ def generate_speech_lollms(
     # Build LoLLMs native payload
     # Priority: audio_sample (base64) > voice > default
     payload = {
-        "input": text,
-        "response_format": response_format,
-        "speed": 1.0
-    }
+            "input": text,
+            "response_format": response_format,
+            "speed": 1.0,
+            "language": language
+        }
     
     # Add model if specified
     if model:

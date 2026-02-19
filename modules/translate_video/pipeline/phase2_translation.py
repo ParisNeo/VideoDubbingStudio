@@ -549,13 +549,14 @@ class TTSEngine:
                 if not is_silence:
                     current_duration = len(audio) / 24000
                     
-                    if abs(current_duration - target_duration) > 0.1:
-                        try:
-                            import librosa
-                            rate = current_duration / target_duration
-                            audio = librosa.effects.time_stretch(audio, rate=rate)
-                        except Exception as e:
-                            logger.warning(f"Time-stretch failed for segment {segment.idx}: {e}")
+                    # deactivate time stretching
+                    # if abs(current_duration - target_duration) > 0.1:
+                    #     try:
+                    #         import librosa
+                    #         rate = current_duration / target_duration
+                    #         audio = librosa.effects.time_stretch(audio, rate=rate)
+                    #     except Exception as e:
+                    #         logger.warning(f"Time-stretch failed for segment {segment.idx}: {e}")
             
             # Save
             output_path = output_dir / f"segment_{segment.idx:04d}.wav"

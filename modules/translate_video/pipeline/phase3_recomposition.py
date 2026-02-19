@@ -1,16 +1,23 @@
-"""
-Phase 3: Final Video Assembly
+# CRITICAL: SVML Workaround - MUST be first, before ANY numpy/scipy imports
+# This prevents LLVM errors with Intel MKL/SVML on Windows
+import os
+import sys
 
-Complete pipeline: Build speech track → Mix with background → Merge with video
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+os.environ["MKL_ENABLE_INSTRUCTIONS"] = "SSE4_2"  # Disable AVX/AVX2/SVML
+os.environ["NPY_DISABLE_CPU_FEATURES"] = "AVX512F,AVX2,AVX"  # Disable NumPy AVX
 
-This module handles the final assembly of the dubbed video with proper
-audio synchronization and optional background preservation.
+# Also set thread limits for any already-loaded OpenMP
+try:
+    import ctypes
+    ctypes.CDLL(None).omp_set_num_threads(1)
+except:
+    pass
 
-Checkpoints:
-- After speech track built
-- After final audio mixed
-"""
-
+# Now safe to import numpy/scipy
 import asyncio
 import numpy as np
 import soundfile as sf
@@ -63,26 +70,35 @@ def apply_crossfade(audio: np.ndarray,
     return result
 
 
-def time_stretch(audio: np.ndarray, 
-                 target_duration: float,
-                 current_sample_rate: int = 24000) -> np.ndarray:
+def time_stretch_simple(audio: np.ndarray, 
+                        target_duration: float,
+                        current_sample_rate: int = 24000) -> np.ndarray:
     """
-    Time-stretch audio to match target duration.
+    Time-stretch audio to match target duration using simple resampling.
     
-    Uses librosa if available, otherwise returns original.
+    Uses linear interpolation instead of librosa to avoid SVML dependencies.
     """
     current_duration = len(audio) / current_sample_rate
     
     if abs(current_duration - target_duration) < 0.05:
         return audio  # Close enough
     
-    try:
-        import librosa
-        rate = current_duration / target_duration
-        return librosa.effects.time_stretch(audio, rate=rate)
-    except Exception as e:
-        logger.warning(f"Time-stretch failed: {e}")
+    # Calculate target length
+    target_length = int(target_duration * current_sample_rate)
+    
+    if target_length <= 0:
         return audio
+    
+    # Simple linear interpolation (no SVML dependencies)
+    indices = np.linspace(0, len(audio) - 1, target_length)
+    indices_floor = np.floor(indices).astype(np.int64)
+    indices_ceil = np.minimum(indices_floor + 1, len(audio) - 1)
+    fractions = indices - indices_floor
+    
+    # Linear interpolation
+    stretched = audio[indices_floor] * (1 - fractions) + audio[indices_ceil] * fractions
+    
+    return stretched.astype(np.float32)
 
 
 def build_speech_track(
@@ -117,15 +133,22 @@ def build_speech_track(
             if len(seg_audio.shape) > 1:
                 seg_audio = seg_audio.mean(axis=1)
             
-            # Resample to target rate
+            # Resample to target rate using simple method (avoid librosa/SVML)
             if seg_sr != target_sample_rate:
-                import librosa
-                seg_audio = librosa.resample(seg_audio, orig_sr=seg_sr, 
-                                              target_sr=target_sample_rate)
+                # Simple resampling using numpy
+                resample_ratio = target_sample_rate / seg_sr
+                new_length = int(len(seg_audio) * resample_ratio)
+                if new_length > 0:
+                    indices = np.linspace(0, len(seg_audio) - 1, new_length)
+                    indices_floor = np.floor(indices).astype(np.int64)
+                    indices_ceil = np.minimum(indices_floor + 1, len(seg_audio) - 1)
+                    fractions = indices - indices_floor
+                    seg_audio = seg_audio[indices_floor] * (1 - fractions) + seg_audio[indices_ceil] * fractions
+                    seg_audio = seg_audio.astype(np.float32)
             
-            # Time-stretch to match original duration
+            # Time-stretch to match original duration using simple method
             target_duration = seg.end - seg.start
-            seg_audio = time_stretch(seg_audio, target_duration, target_sample_rate)
+            seg_audio = time_stretch_simple(seg_audio, target_duration, target_sample_rate)
             
             # Place in track
             start_sample = int(seg.start * target_sample_rate)
@@ -231,8 +254,16 @@ def mix_audio_tracks(
     # Ensure target sample rate
     target_sr = 48000
     if sr != target_sr:
-        import librosa
-        speech = librosa.resample(speech, orig_sr=sr, target_sr=target_sr)
+        # Simple resampling
+        resample_ratio = target_sr / sr
+        new_length = int(len(speech) * resample_ratio)
+        if new_length > 0:
+            indices = np.linspace(0, len(speech) - 1, new_length)
+            indices_floor = np.floor(indices).astype(np.int64)
+            indices_ceil = np.minimum(indices_floor + 1, len(speech) - 1)
+            fractions = indices - indices_floor
+            speech = speech[indices_floor] * (1 - fractions) + speech[indices_ceil] * fractions
+            speech = speech.astype(np.float32)
         sr = target_sr
     
     # If no background, just apply speech gain
@@ -253,8 +284,15 @@ def mix_audio_tracks(
     
     # Resample background
     if bg_sr != sr:
-        import librosa
-        bg = librosa.resample(bg, orig_sr=bg_sr, target_sr=sr)
+        resample_ratio = sr / bg_sr
+        new_length = int(len(bg) * resample_ratio)
+        if new_length > 0:
+            indices = np.linspace(0, len(bg) - 1, new_length)
+            indices_floor = np.floor(indices).astype(np.int64)
+            indices_ceil = np.minimum(indices_floor + 1, len(bg) - 1)
+            fractions = indices - indices_floor
+            bg = bg[indices_floor] * (1 - fractions) + bg[indices_ceil] * fractions
+            bg = bg.astype(np.float32)
     
     # Match lengths
     if len(bg) < len(speech):
@@ -264,20 +302,29 @@ def mix_audio_tracks(
     else:
         bg = bg[:len(speech)]
     
-    # Apply ducking: background lowers when speech present
-    speech_rms = np.sqrt(np.convolve(speech**2, np.ones(sr//10)/(sr//10), mode='same'))
-    speech_present = speech_rms > 0.01
+    # Simple ducking: background lowers when speech present
+    # Use simple moving average instead of convolution to avoid SciPy
+    window_size = sr // 10  # 100ms window
+    speech_power = np.zeros(len(speech))
+    for i in range(len(speech)):
+        start = max(0, i - window_size // 2)
+        end = min(len(speech), i + window_size // 2)
+        speech_power[i] = np.mean(speech[start:end] ** 2)
     
-    # Ducking envelope
-    from scipy.ndimage import gaussian_filter1d
-    bg_envelope = np.where(speech_present, 0.3, 1.0)
-    bg_envelope = gaussian_filter1d(bg_envelope, sigma=sr//50)
+    speech_present = speech_power > 0.0001  # Threshold
+    
+    # Simple smoothing with box filter
+    ducking = np.ones(len(speech))
+    for i in range(len(speech)):
+        start = max(0, i - window_size // 5)  # 20ms smoothing
+        end = min(len(speech), i + window_size // 5)
+        ducking[i] = 0.3 if np.any(speech_present[start:end]) else 1.0
     
     # Apply gains
     speech_gain = 10 ** (speech_gain_db / 20)
     bg_gain = 10 ** (background_gain_db / 20)
     
-    mixed = speech * speech_gain + bg * bg_gain * bg_envelope
+    mixed = speech * speech_gain + bg * bg_gain * ducking
     
     # Final normalize
     peak = np.max(np.abs(mixed))
@@ -303,13 +350,18 @@ def merge_with_video(
     Merge final audio with video using FFmpeg.
     
     Returns: path to final video
+    
+    Raises:
+        RuntimeError: If merge fails
     """
+    # First attempt: Use aac with strict flag (for older FFmpeg versions)
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
         "-i", audio_path,
         "-c:v", "copy",
         "-c:a", "aac",
+        "-strict", "-2",  # Enable experimental AAC encoder
         "-b:a", "192k",
         "-ar", "48000",
         "-map", "0:v:0",
@@ -321,8 +373,45 @@ def merge_with_video(
     
     result = subprocess.run(cmd, capture_output=True, text=True)
     
+    # If first attempt fails, try with libvo_aacenc (non-experimental alternative)
     if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg merge failed: {result.stderr}")
+        error_msg = result.stderr
+        
+        # Check if it's the AAC experimental encoder error
+        if "experimental" in error_msg.lower() or "libvo_aacenc" in error_msg.lower():
+            logger.warning("AAC encoder failed, trying libvo_aacenc fallback...")
+            
+            cmd_fallback = [
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-i", audio_path,
+                "-c:v", "copy",
+                "-c:a", "libvo_aacenc",  # Non-experimental AAC encoder
+                "-b:a", "192k",
+                "-ar", "48000",
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-shortest",
+                "-movflags", "+faststart",
+                str(output_path)
+            ]
+            
+            result_fallback = subprocess.run(cmd_fallback, capture_output=True, text=True)
+            
+            if result_fallback.returncode == 0:
+                if progress_callback:
+                    progress_callback("Video merge complete (using libvo_aacenc)")
+                return str(output_path)
+            
+            # If fallback also fails, raise with both error messages
+            raise RuntimeError(
+                f"FFmpeg merge failed with both AAC encoders.\n"
+                f"Original (aac -strict -2): {error_msg}\n"
+                f"Fallback (libvo_aacenc): {result_fallback.stderr}"
+            )
+        
+        # Not an AAC error, raise original error
+        raise RuntimeError(f"FFmpeg merge failed: {error_msg}")
     
     if progress_callback:
         progress_callback("Video merge complete")
@@ -527,3 +616,4 @@ __all__ = [
     'merge_with_video',
     'separate_background_demucs'
 ]
+
