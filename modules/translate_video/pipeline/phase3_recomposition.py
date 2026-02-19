@@ -72,18 +72,74 @@ def apply_crossfade(audio: np.ndarray,
 
 def time_stretch_simple(audio: np.ndarray, 
                         target_duration: float,
-                        current_sample_rate: int = 24000) -> np.ndarray:
+                        current_sample_rate: int = 24000,
+                        max_stretch_ratio: float = 2.0) -> np.ndarray:
     """
     Time-stretch audio to match target duration using simple resampling.
     
-    Uses linear interpolation instead of librosa to avoid SVML dependencies.
+    Uses linear interpolation with reasonable limits to prevent over-stretching.
     """
     current_duration = len(audio) / current_sample_rate
     
+    # Skip if already close enough
     if abs(current_duration - target_duration) < 0.05:
-        return audio  # Close enough
+        return audio
     
-    # Calculate target length
+    # Calculate stretch ratio
+    if current_duration == 0:
+        return audio
+    
+    stretch_ratio = target_duration / current_duration
+    
+    # Limit extreme stretching - prefer natural speed with padding over distortion
+    if stretch_ratio > max_stretch_ratio:
+        # Audio is too short - stretch moderately and pad with silence
+        limited_ratio = max_stretch_ratio
+        limited_duration = current_duration * limited_ratio
+        target_length = int(limited_duration * current_sample_rate)
+        
+        # Stretch to limited ratio
+        indices = np.linspace(0, len(audio) - 1, target_length)
+        indices_floor = np.floor(indices).astype(np.int64)
+        indices_ceil = np.minimum(indices_floor + 1, len(audio) - 1)
+        fractions = indices - indices_floor
+        stretched = audio[indices_floor] * (1 - fractions) + audio[indices_ceil] * fractions
+        
+        # Pad with silence to reach target duration
+        final_length = int(target_duration * current_sample_rate)
+        if final_length > len(stretched):
+            silence = np.zeros(final_length - len(stretched), dtype=np.float32)
+            stretched = np.concatenate([stretched, silence])
+        
+        return stretched.astype(np.float32)
+        
+    elif stretch_ratio < 1.0 / max_stretch_ratio:
+        # Audio is too long - compress moderately and truncate if needed
+        limited_ratio = 1.0 / max_stretch_ratio
+        limited_duration = current_duration * limited_ratio
+        target_length = int(limited_duration * current_sample_rate)
+        
+        # Compress to limited ratio
+        indices = np.linspace(0, len(audio) - 1, target_length)
+        indices_floor = np.floor(indices).astype(np.int64)
+        indices_ceil = np.minimum(indices_floor + 1, len(audio) - 1)
+        fractions = indices - indices_floor
+        stretched = audio[indices_floor] * (1 - fractions) + audio[indices_ceil] * fractions
+        
+        # If still too long, fade out at the end instead of abrupt cut
+        final_length = int(target_duration * current_sample_rate)
+        if len(stretched) > final_length:
+            # Truncate with fade out
+            stretched = stretched[:final_length]
+            # Apply fade out to last 100ms
+            fade_samples = min(int(0.1 * current_sample_rate), final_length // 4)
+            if fade_samples > 10:
+                fade_out = np.linspace(1, 0, fade_samples)
+                stretched[-fade_samples:] *= fade_out
+        
+        return stretched.astype(np.float32)
+    
+    # Normal stretching within acceptable limits
     target_length = int(target_duration * current_sample_rate)
     
     if target_length <= 0:

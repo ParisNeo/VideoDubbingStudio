@@ -836,10 +836,16 @@ async def download_result(task_id: str):
         if not output_path.exists():
             raise HTTPException(404, "File not found on disk")
         
+        # Use filename or input_filename as fallback for original_filename
+        download_name = task.get('filename') or task.get('input_filename') or 'video.mp4'
+        # Add dubbed_ prefix but keep original extension
+        stem = Path(download_name).stem
+        ext = output_path.suffix or '.mp4'
+        
         return FileResponse(
             output_path,
             media_type="video/mp4",
-            filename=f"dubbed_{task['original_filename']}"
+            filename=f"dubbed_{stem}{ext}"
         )
         
     except HTTPException:
