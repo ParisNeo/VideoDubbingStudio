@@ -60,6 +60,22 @@ STATUS_FILE = BASE_DIR / "task_history.json"
 STATUS_BACKUP = STATUS_FILE.with_suffix(".bak")
 STATUS_TEMP = STATUS_FILE.with_suffix(".tmp")
 
+def str_to_bool(value: str | None, default: bool = False) -> bool:
+    """
+    Convert common textual representations to a real bool.
+    Returns `default` when `value` is None.
+    """
+    if value is None:
+        return default
+    truthy = {"true", "1", "yes", "y", "on"}
+    falsy = {"false", "0", "no", "n", "off"}
+    lowered = value.strip().lower()
+    if lowered in truthy:
+        return True
+    if lowered in falsy:
+        return False
+    # If the string is unknown, fall back to the default (or raise)
+    return default
 
 class ResourceManager:
     """Singleton GPU resource manager with 8GB-optimized loading."""
@@ -96,7 +112,7 @@ class ResourceManager:
         self.lollms_url = os.getenv("LOLLMS_URL", "http://localhost:9642")
         self.lollms_service_key = os.getenv("LOLLMS_API_KEY", "")
         self.lollms_model = os.getenv("LOLLMS_MODEL_NAME", "mistral")
-        self.verify_ssl_certificate = bool(os.getenv("LOLLMS_VERIFY_SSL_CERTIFICATE", True))
+        self.verify_ssl_certificate = str_to_bool(os.getenv("LOLLMS_VERIFY_SSL_CERTIFICATE", True))
 
         # Demucs model (lazy loaded)
         self._demucs_model = None
