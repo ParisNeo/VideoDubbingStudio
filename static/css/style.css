@@ -280,6 +280,10 @@ header h1 i {
     box-shadow: 0 4px 20px rgba(88, 166, 255, 0.15);
 }
 
+.task-header:hover .filename {
+    text-decoration: underline;
+}
+
 .task-card[data-status="processing"] {
     border-left: 3px solid var(--accent);
 }
@@ -1310,11 +1314,19 @@ header h1 i {
     padding: 12px 10px;
     z-index: 1;
     border-radius: 6px;
-    transition: background-color 0.2s;
+    transition: all 0.2s;
+    cursor: pointer; /* Nodes are now clickable */
 }
 
 .task-node:hover {
     background-color: var(--bg-hover);
+    transform: translateX(4px);
+    border-right: 2px solid var(--accent);
+}
+
+.task-node.active-step {
+    background-color: rgba(88, 166, 255, 0.1);
+    border-right: 3px solid var(--accent);
 }
 
 .task-node:hover .restart-btn {

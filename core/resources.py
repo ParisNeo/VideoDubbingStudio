@@ -147,10 +147,40 @@ class ResourceManager:
     # --------------------------------------------------------------------
     # 1. Whisper (Speech-to-Text) - Optimized for 8GB and Windows compatible
     # --------------------------------------------------------------------
-    def get_whisper(self):
+    def get_whisper(self, model_name: Optional[str] = None):
+        """
+        Get Whisper model for speech-to-text.
+        
+        Args:
+            model_name: Model to use (tiny, base, small, medium, large-v1, large-v2, large-v3)
+                       Defaults to WHISPER_MODEL env var or 'large-v2'
+        """
         def _loader():
-            # Use large-v2 instead of v3-turbo for better memory efficiency on 8GB
-            model_id = "openai/whisper-large-v2"
+            # Model selection with VRAM-aware defaults
+            WHISPER_MODELS = {
+                'tiny': {'id': 'openai/whisper-tiny', 'vram_mb': 400, 'speed': 'fastest', 'quality': 'lowest'},
+                'base': {'id': 'openai/whisper-base', 'vram_mb': 800, 'speed': 'very fast', 'quality': 'low'},
+                'small': {'id': 'openai/whisper-small', 'vram_mb': 2000, 'speed': 'fast', 'quality': 'medium'},
+                'medium': {'id': 'openai/whisper-medium', 'vram_mb': 5000, 'speed': 'medium', 'quality': 'good'},
+                'large-v1': {'id': 'openai/whisper-large', 'vram_mb': 10000, 'speed': 'slow', 'quality': 'excellent'},
+                'large-v2': {'id': 'openai/whisper-large-v2', 'vram_mb': 10000, 'speed': 'slow', 'quality': 'excellent'},
+                'large-v3': {'id': 'openai/whisper-large-v3', 'vram_mb': 10000, 'speed': 'slow', 'quality': 'best'},
+            }
+            
+            # Get model from param, env var, or default
+            import os
+            selected = (model_name or 
+                       os.getenv("WHISPER_MODEL", "large-v2")).lower().strip()
+            
+            # Map legacy names
+            if selected == 'large':
+                selected = 'large-v2'
+            
+            model_info = WHISPER_MODELS.get(selected, WHISPER_MODELS['large-v2'])
+            model_id = model_info['id']
+            
+            logger.info(f"Loading Whisper model: {selected} ({model_id}) - "
+                       f"VRAM: ~{model_info['vram_mb']}MB, Quality: {model_info['quality']}")
 
             try:
                 model = AutoModelForSpeechSeq2Seq.from_pretrained(

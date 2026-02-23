@@ -91,8 +91,9 @@ function renderTasks(tasks, container) {
                              task.status === 'completed' ? 100 : 
                              (task.progress || 0);
         
+        // Fix: Parse ISO string correctly
         const date = task.created_at ? 
-            new Date(task.created_at * 1000).toLocaleDateString() : 'Unknown';
+            new Date(task.created_at).toLocaleDateString() : 'Unknown';
         
         // Determine project type icon
         const typeIcon = getProjectTypeIcon(task);
@@ -107,6 +108,9 @@ function renderTasks(tasks, container) {
         
         if (task.status === 'completed') {
             actionButtons = `
+                <button class="btn-secondary btn-sm" onclick="openTask('${task.task_id}')" title="View details and steps">
+                    <i class="fas fa-eye"></i> View Steps
+                </button>
                 <a href="/api/projects/${task.task_id}/download" class="btn-primary btn-sm" title="Download result">
                     <i class="fas fa-download"></i> Download
                 </a>
@@ -140,14 +144,14 @@ function renderTasks(tasks, container) {
         
         return `
             <div class="task-card" data-task-id="${task.task_id}" data-status="${task.status}">
-                <div class="task-header">
+                <div class="task-header" onclick="openTask('${task.task_id}')" style="cursor: pointer;">
                     <div style="display: flex; gap: 15px; align-items: center; width: 100%;">
                         <div style="width: 60px; height: 45px; background: var(--bg-hover); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; flex-shrink: 0; border: 1px solid var(--border);">
                             ${typeIcon}
                         </div>
                         <div class="task-title" style="flex: 1; min-width: 0;">
                             <div style="display: flex; justify-content: space-between; align-items: flex-start; width: 100%;">
-                                <span class="filename" title="${task.filename || 'Untitled'}" style="font-size: 1.05rem; margin-bottom: 4px;">${truncate(task.filename || 'Untitled', 35)}</span>
+                                <span class="filename" title="${task.filename || 'Untitled'}" style="font-size: 1.05rem; margin-bottom: 4px; color: var(--accent);">${truncate(task.filename || 'Untitled', 35)}</span>
                                 <div class="task-badges">
                                     ${interruptedWarning}
                                     <span class="status-badge ${statusClass}">${formatStatus(task.status)}</span>
@@ -243,15 +247,29 @@ function newProject() {
     }
 }
 
-function openTask(taskId) {
+async function openTask(taskId) {
     console.log(`Opening task: ${taskId}`);
-    import('./video_dub.js').then(mod => {
-        mod.openMonitor(taskId);
-    }).catch(err => {
-        console.error('Failed to load video_dub module:', err);
-    });
+    try {
+        const task = await getJSON(`/api/projects/${taskId}`);
+        
+        // Route to the correct view based on source
+        if (task.source === 'transcribe') {
+            doSwitchView('transcribe');
+            // Assuming transcribe module has a similar monitor function
+            import('./transcribe.js').then(mod => {
+                if (mod.openMonitor) mod.openMonitor(taskId);
+                else mod.onShow(); // Fallback if specialized monitor isn't ready
+            });
+        } else {
+            // Default to video dubbing
+            import('./video_dub.js').then(mod => {
+                mod.openMonitor(taskId);
+            });
+        }
+    } catch (err) {
+        console.error('Failed to route task:', err);
+    }
 }
-
 async function resumeTask(taskId) {
     console.log(`Resuming task: ${taskId}`);
     const confirmed = await window.uiConfirm('Resume this task from where it left off?', 'Resume Task');

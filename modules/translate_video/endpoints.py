@@ -800,12 +800,17 @@ async def validate_audio_api(task_id: str):
 async def download_result(task_id: str):
     try:
         task = db.get_task(task_id)
-        if not task or not task.get('output_path'):
-            raise HTTPException(404, "Output not ready")
+        if not task:
+            raise HTTPException(404, "Project not found")
+            
+        # Try to find the file in the standard location if output_path is missing or wrong
+        output_path = Path(f"outputs/{task_id}/dubbed_video.mp4")
         
-        output_path = Path(task['output_path'])
+        if not output_path.exists() and task.get('output_path'):
+            output_path = Path(task['output_path'])
+
         if not output_path.exists():
-            raise HTTPException(404, "File not found on disk")
+            raise HTTPException(404, f"Final video file not found at {output_path}")
         
         # Use filename or input_filename as fallback for original_filename
         download_name = task.get('filename') or task.get('input_filename') or 'video.mp4'
@@ -828,20 +833,61 @@ async def download_result(task_id: str):
 
 @router.get("/api/projects/{task_id}/preview/{segment_idx}")
 async def preview_segment_audio(task_id: str, segment_idx: int):
+    """Unified slice-and-stream service for both transcription and translation review."""
+    import subprocess
+    from fastapi import Response
     try:
-        translations = db.get_translation_segments(task_id)
-        trans = next((t for t in translations if t['segment_idx'] == segment_idx), None)
-        
-        if trans and trans.get('audio_path') and Path(trans['audio_path']).exists():
-            return FileResponse(trans['audio_path'], media_type="audio/wav")
-        
         task = db.get_task(task_id)
-        if task and task.get('segments') and segment_idx < len(task['segments']):
-            seg_path = task['segments'][segment_idx].get('audio_path')
-            if seg_path and Path(seg_path).exists():
-                return FileResponse(seg_path, media_type="audio/wav")
+        if not task: raise HTTPException(404, "Task not found")
         
-        raise HTTPException(404, "Audio not found")
+        all_segs = task.get('segments', []) or task.get('transcribed_segments', [])
+        if segment_idx >= len(all_segs):
+            raise HTTPException(404, f"Segment {segment_idx} not found")
+            
+        seg = all_segs[segment_idx]
+
+        # Priority 1: Check if synthesized TTS audio exists
+        if seg.get('audio_path'):
+            audio_path = Path(seg['audio_path'])
+            if audio_path.exists():
+                return FileResponse(str(audio_path), media_type="audio/wav")
+
+        # Priority 2: Slice from Master Audio
+        master_wav = task.get('master_audio') or task.get('file_path')
+        if not master_wav:
+            raise HTTPException(404, "Source audio path missing")
+            
+        master_path = Path(master_wav)
+        if not master_path.exists():
+            raise HTTPException(404, f"Source file not found at {master_wav}")
+
+        start = seg.get('start', 0)
+        end = seg.get('end', 0)
+        duration = max(0.1, end - start)
+
+        # Extract precise slice using FFmpeg - using .run for better stability on Windows
+        cmd = [
+            "ffmpeg", "-y", 
+            "-ss", str(round(start, 3)), 
+            "-t", str(round(duration, 3)),
+            "-i", str(master_path.absolute()), 
+            "-f", "wav", "pipe:1"
+        ]
+        
+        # Hide the console window on Windows to prevent flickering
+        startupinfo = None
+        if sys.platform == "win32":
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            startupinfo=startupinfo,
+            check=True
+        )
+        
+        return Response(content=result.stdout, media_type="audio/wav")
         
     except HTTPException:
         raise

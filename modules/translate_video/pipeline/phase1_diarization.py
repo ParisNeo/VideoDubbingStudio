@@ -137,16 +137,14 @@ def extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) -
 # -------------------------------------------------------------------------------------------------------------------------------
 # VAD (VOICE ACTIVITY DETECTION)
 # -------------------------------------------------------------------------------------------------------------------------------
-
 def run_vad(audio_path: str, 
-            threshold: float = 0.35, # Lowered from 0.5 to be more sensitive
-            min_speech_duration_ms: int = 150) -> List[Dict[str, float]]: # Lowered for short words
+            threshold: float = 0.15, # Increased sensitivity (Lower = more inclusive)
+            min_speech_duration_ms: int = 100) -> List[Dict[str, float]]: 
     """
-    Run Silero VAD on audio file.
-    
-    Returns list of {start, end} dicts in seconds.
+    Run Silero VAD with silence-padding and greedy merging to prevent audio stripping.
     """
     import torch
+    import numpy as np
     
     # Load model
     model, utils = torch.hub.load(
@@ -157,24 +155,54 @@ def run_vad(audio_path: str,
     )
     get_speech_timestamps, _, read_audio, _, _ = utils
     
-    # Load audio
+    # 1. Load audio and PREPEND 1 second of silence to capture immediate speech at 0.0s
     wav = read_audio(audio_path)
+    padding_len = 16000 # 1 second at 16kHz
+    padding = torch.zeros(padding_len)
+    padded_wav = torch.cat([padding, wav])
     
-    # Get timestamps
+    # 2. Get timestamps from padded audio
+    # Increased min_silence_duration_ms to 1000ms to merge words into sentences
     speech_timestamps = get_speech_timestamps(
-        wav, 
+        padded_wav, 
         model, 
         sampling_rate=16000,
         threshold=threshold,
         min_speech_duration_ms=min_speech_duration_ms,
-        min_silence_duration_ms=300 # Lowered from 500 to catch faster speakers
+        min_silence_duration_ms=1000 
     )
     
-    # Convert to seconds
-    return [
-        {'start': ts['start'] / 16000, 'end': ts['end'] / 16000}
-        for ts in speech_timestamps
-    ]
+    # 3. Adjust timestamps back and apply greedy safety buffers
+    refined_segments = []
+    for ts in speech_timestamps:
+        # Subtract the 1.0s padding
+        start = (ts['start'] / 16000) - 1.0
+        end = (ts['end'] / 16000) - 1.0
+        
+        # Greedy buffers: 300ms room to prevent word clipping
+        start = max(0, start - 0.3) 
+        end = end + 0.3             
+        
+        duration = end - start
+        if duration < 0.1: continue # Only ignore absolute micro-blips
+        
+        # Split long segments for Whisper reliability (max 30s)
+        if duration > 30:
+            curr = start
+            while curr < end:
+                chunk_end = min(curr + 25, end) # Use 25s for safe overlap
+                if (end - chunk_end) < 5: chunk_end = end
+                refined_segments.append({'start': curr, 'end': chunk_end})
+                curr = chunk_end
+        else:
+            refined_segments.append({'start': start, 'end': end})
+
+    # Fallback: If nothing detected, return the whole file as one segment to prevent total loss
+    if not refined_segments and len(wav) > 0:
+        logger.warning("VAD detected no speech. Falling back to full-file segment.")
+        refined_segments.append({'start': 0.0, 'end': len(wav) / 16000})
+
+    return refined_segments
 
 
 # -------------------------------------------------------------------------------------------------------------------------------
@@ -293,15 +321,13 @@ class SpeakerIdentifier:
                         progress_callback: Optional[Callable[[str], None]] = None
                         ) -> Dict[int, int]:
         """
-        Cluster embeddings to identify speakers.
-        
-        Returns: mapping from segment index to speaker ID
+        Cluster embeddings to identify speakers. Favoring single-speaker consistency.
         """
         if len(embeddings) == 0:
             return {}
         
-        if len(embeddings) == 1:
-            return {0: 0}
+        if len(embeddings) < 3: # Too few samples for meaningful clustering
+            return {i: 0 for i in range(len(embeddings))}
         
         from sklearn.cluster import AgglomerativeClustering
         from sklearn.metrics import silhouette_score
@@ -310,93 +336,73 @@ class SpeakerIdentifier:
         n_samples = len(X)
         
         # Determine optimal number of speakers
-        max_k = min(n_samples - 1, self.max_speakers) if n_samples > 2 else 2
-        min_k = 1 if n_samples == 1 else 2
+        max_k = min(n_samples - 1, self.max_speakers)
         
-        best_n = 1 if n_samples == 1 else 2
+        best_n = 1
         best_score = -1
-        labels = [0] * n_samples
+        labels = np.zeros(n_samples, dtype=int)
         
-        if n_samples >= 2:
-            for k in range(min_k, max_k + 1):
-                try:
-                    if k == 1:
-                        clustering = AgglomerativeClustering(n_clusters=1)
-                        lbls = clustering.fit_predict(X)
-                        score = -0.5
-                    else:
-                        clustering = AgglomerativeClustering(n_clusters=k, metric='cosine', linkage='average')
-                        lbls = clustering.fit_predict(X)
-                        
-                        n_labels = len(set(lbls))
-                        if 1 < n_labels < n_samples:
-                            score = silhouette_score(X, lbls, metric='cosine')
-                        elif n_labels == 1:
-                            score = -0.5
-                        else:
-                            score = -1
-                    
-                    if score > best_score:
-                        best_score = score
-                        best_n = k
-                        labels = lbls
-                        
-                except Exception as e:
-                    logger.debug(f"Clustering with {k} speakers failed: {e}")
+        # Evaluation loop
+        for k in range(2, max_k + 1):
+            try:
+                clustering = AgglomerativeClustering(
+                    n_clusters=k, 
+                    metric='cosine', 
+                    linkage='average' # Average linkage is more stable for speech
+                )
+                lbls = clustering.fit_predict(X)
+                
+                score = silhouette_score(X, lbls, metric='cosine')
+                
+                # Bias: To avoid splitting a single speaker into many, 
+                # we require a significant improvement in silhouette score to increase K
+                if score > (best_score + 0.15): 
+                    best_score = score
+                    best_n = k
+                    labels = lbls
+            except:
+                continue
+        
+        # Final safety: If best score is very low, it's likely just one speaker
+        if best_score < 0.4:
+            best_n = 1
+            labels = np.zeros(n_samples, dtype=int)
         
         if progress_callback:
-            progress_callback(f"Identified {best_n} speakers")
+            progress_callback(f"Identified {best_n} distinct speaker identities")
         
         return {i: int(label) for i, label in enumerate(labels)}
     
-    def run(self, 
-            audio_path: str,
-            progress_callback: Optional[Callable[[str, int, int], None]] = None
-            ) -> Tuple[List[SpeechSegment], Dict[int, int], int]:
+    def run_with_vad(self, 
+                    audio_path: str,
+                    speech_segments: List[Dict[str, float]],
+                    progress_callback: Optional[Callable[[str, int, int], None]] = None
+                    ) -> Tuple[List[SpeechSegment], Dict[int, int], int]:
         """
-        Run complete speaker identification.
-        
-        Returns: (segments with speaker IDs, assignments mapping, speaker count)
+        Run identification using pre-calculated VAD segments (Respects sensitivity settings).
         """
-        # Step 1: VAD
         if progress_callback:
-            progress_callback("Running voice activity detection...", 0, 100)
+            progress_callback(f"Analyzing {len(speech_segments)} detected speech segments...", 20, 100)
         
-        speech_segments = run_vad(audio_path)
-
-        # Fallback: If VAD is too strict and finds nothing/very little, try ultra-sensitive
-        if len(speech_segments) <= 1:
-            logger.info("VAD found 1 or fewer segments. Retrying with ultra-sensitive settings...")
-            speech_segments = run_vad(audio_path, threshold=0.2, min_silence_duration_ms=200)
-        
-        if progress_callback:
-            progress_callback(f"Found {len(speech_segments)} speech segments", 20, 100)
-        
-        # Step 2: Extract embeddings
-        if progress_callback:
-            progress_callback("Extracting speaker embeddings...", 25, 100)
-        
+        # Step 1: Extract embeddings
         def emb_progress(current, total):
             if progress_callback:
-                pct = 25 + int((current / total) * 35)
-                progress_callback(f"Extracted {current}/{total} embeddings...", pct, 100)
+                pct = 20 + int((current / total) * 40) # Mapping 20% -> 60%
+                progress_callback(f"Extracting speaker features: {current}/{total}", pct, 100)
         
         segments, embeddings = self.extract_embeddings(audio_path, speech_segments, emb_progress)
         
+        # Step 2: Cluster
         if progress_callback:
-            progress_callback(f"Embeddings extracted: {len(embeddings)}", 60, 100)
-        
-        # Step 3: Cluster
-        if progress_callback:
-            progress_callback("Clustering speakers...", 65, 100)
+            progress_callback("Grouping speakers...", 70, 100)
         
         def cluster_progress(msg):
             if progress_callback:
-                progress_callback(msg, 80, 100)
+                progress_callback(msg, 85, 100)
         
         assignments = self.cluster_speakers(embeddings, cluster_progress)
         
-        # Update segments with speaker IDs
+        # Step 3: Assign IDs
         for i, seg in enumerate(segments):
             seg.speaker_id = assignments.get(i, 0)
         
@@ -406,6 +412,19 @@ class SpeakerIdentifier:
             progress_callback(f"Diarization complete: {num_speakers} speakers", 100, 100)
         
         return segments, assignments, num_speakers
+
+    def run(self, 
+            audio_path: str,
+            progress_callback: Optional[Callable[[str, int, int], None]] = None
+            ) -> Tuple[List[SpeechSegment], Dict[int, int], int]:
+        """
+        Legacy entry point: Runs VAD internally with default settings.
+        """
+        if progress_callback:
+            progress_callback("Detecting speech...", 0, 100)
+        
+        speech_segments = run_vad(audio_path)
+        return self.run_with_vad(audio_path, speech_segments, progress_callback)
 
 
 # -------------------------------------------------------------------------------------------------------------------------------
@@ -442,12 +461,14 @@ def extract_speaker_samples(
     speaker_config = {}
     
     for sid, segs in speakers.items():
-        # Find longest segment for this speaker
-        best_seg = max(segs, key=lambda s: s.end - s.start)
+        # Find the segment that is likely the clearest (not too short, not too long)
+        # 5-10 seconds is ideal for a voice sample
+        ideal_segs = [s for s in segs if 3.0 < (s.end - s.start) < 15.0]
+        best_seg = ideal_segs[0] if ideal_segs else max(segs, key=lambda s: s.end - s.start)
         
-        # Extract audio
-        start_sample = int(best_seg.start * sr)
-        end_sample = int(best_seg.end * sr)
+        # Extract audio with explicit bounds check
+        start_sample = max(0, int(best_seg.start * sr))
+        end_sample = min(len(audio_np), int(best_seg.end * sr))
         sample_audio = audio_np[start_sample:end_sample]
         
         # Save sample
@@ -477,34 +498,18 @@ def transcribe_segments(
     audio_path: str,
     segments: List[SpeechSegment],
     source_language: str = "auto",
-    progress_callback: Optional[Callable[[int, int], None]] = None
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    whisper_model: Optional[str] = None
 ) -> List[SpeechSegment]:
     """
-    Transcribe all segments using Whisper.
-    
-    Modifies segments in-place with original_text.
+    Transcribe all segments using mutualized robust Whisper logic.
     """
-    from transformers import AutoFeatureExtractor
-    
-    # Load Whisper
-    whisper_pipe = manager.get_whisper()
-    model = whisper_pipe.model
-    tokenizer = whisper_pipe.tokenizer
-    
-    # Get feature extractor
-    if hasattr(whisper_pipe, 'feature_extractor'):
-        feature_extractor = whisper_pipe.feature_extractor
-    else:
-        from transformers import AutoFeatureExtractor
-        feature_extractor = AutoFeatureExtractor.from_pretrained("openai/whisper-large-v2")
-    
-    device = manager.device
-    model_dtype = next(model.parameters()).dtype
+    from modules.transcribe.logic import whisper_inference
+    import librosa
     
     # Load master audio
     audio_np, sr = sf.read(audio_path)
-    if len(audio_np.shape) > 1:
-        audio_np = audio_np.mean(axis=1)
+    if len(audio_np.shape) > 1: audio_np = audio_np.mean(axis=1)
     
     total = len(segments)
     
@@ -515,34 +520,16 @@ def transcribe_segments(
             end_sample = int(seg.end * sr)
             chunk = audio_np[start_sample:end_sample]
             
-            # Resample to 16kHz if needed
+            # Resample to 16kHz
             if sr != 16000:
-                import librosa
                 chunk = librosa.resample(chunk, orig_sr=sr, target_sr=16000)
             
-            chunk = chunk.astype(np.float32)
-            
-            # Process with feature extractor
-            inputs = feature_extractor(chunk, sampling_rate=16000, return_tensors="pt")
-            input_features = inputs.input_features.to(device).to(model_dtype)
-            
-            # Generate kwargs
-            generate_kwargs = {}
-            if source_language != 'auto':
-                generate_kwargs["language"] = source_language
-            
-            # Transcribe
-            with torch.no_grad():
-                predicted_ids = model.generate(
-                    input_features,
-                    max_length=448,
-                    num_beams=1,
-                    condition_on_prev_tokens=False,
-                    **generate_kwargs
-                )
-            
-            transcription = tokenizer.batch_decode(predicted_ids, skip_special_tokens=True)[0]
-            seg.original_text = transcription.strip()
+            # Use mutualized inference (handles VRAM cleanup and language)
+            seg.original_text = whisper_inference(
+                chunk.astype(np.float32), 
+                src_lang=source_language, 
+                whisper_model=whisper_model
+            )
             
             if progress_callback and (i % 5 == 0 or i == total - 1):
                 progress_callback(i + 1, total)
@@ -550,11 +537,6 @@ def transcribe_segments(
         except Exception as e:
             logger.error(f"Failed to transcribe segment {seg.idx}: {e}")
             seg.original_text = f"[Transcription error: {str(e)[:50]}]"
-    
-    # Cleanup
-    del model
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
     
     return segments
 
@@ -568,6 +550,9 @@ async def run_diarization_phase(
     video_path: str,
     progress_callback: Optional[Callable] = None
 ):
+    task_data = db.get_task(task_id)
+    # Default to 0.15 for better inclusivity if not set
+    user_threshold = float(task_data.get('vad_threshold', 0.15))
     """Stage 1: Extract audio and identify speakers."""
     import functools
     loop = asyncio.get_running_loop()
@@ -586,14 +571,21 @@ async def run_diarization_phase(
         await report("identifying", 15, "Running diarization...")
         identifier = SpeakerIdentifier(max_speakers=10)
         
+        # 1. Run VAD with user threshold
+        await report("identifying", 10, f"Detecting speech (Sensitivity: {user_threshold})...")
+        speech_segments = run_vad(master_wav, threshold=user_threshold)
+
+        # 2. Run Identification
+        await report("identifying", 20, "Extracting speaker features...")
+        identifier = SpeakerIdentifier(max_speakers=10)
+
         def diar_progress_sync(msg, pct, total):
-            # Use threadsafe call to ensure updates don't race
-            current_pct = 15 + int(pct * 0.5)
+            current_pct = 20 + int(pct * 0.4)
             asyncio.run_coroutine_threadsafe(report("identifying", current_pct, msg), loop)
-            
-        # Run synchronous diarization in executor to keep event loop responsive
+
+        # Modify SpeakerIdentifier to accept pre-defined segments
         segments, assignments, num_speakers = await loop.run_in_executor(
-            None, functools.partial(identifier.run, master_wav, diar_progress_sync)
+            None, functools.partial(identifier.run_with_vad, master_wav, speech_segments, diar_progress_sync)
         )
 
         # 3. Samples
@@ -653,9 +645,12 @@ async def run_transcription_phase(
             current_pct = 10 + int((cur / tot) * 40)
             asyncio.run_coroutine_threadsafe(report("transcribing", current_pct, f"Transcribed {cur}/{tot}"), loop)
 
+        # Get whisper model preference from task
+        whisper_model = task.get('whisper_model')
+        
         # Run transcription in executor
         segments = await loop.run_in_executor(
-            None, functools.partial(transcribe_segments, master_audio, segments, source_language, trans_progress_sync)
+            None, functools.partial(transcribe_segments, master_audio, segments, source_language, trans_progress_sync, whisper_model)
         )
 
         # Stop for Transcription Review

@@ -89,6 +89,8 @@ class Database:
                 src_lang TEXT DEFAULT 'auto',
                 separate_audio INTEGER DEFAULT 0,
                 tts_engine TEXT DEFAULT 'f5',
+                whisper_model TEXT DEFAULT 'large-v2',
+                vad_threshold REAL DEFAULT 0.25,
                 
                 -- Result tracking
                 output_path TEXT,
@@ -213,7 +215,8 @@ class Database:
             'current_task_status': 'TEXT',
             'translation_segments': 'TEXT',
             'background_audio': 'TEXT',
-            'error_traceback': 'TEXT'
+            'error_traceback': 'TEXT',
+            'whisper_model': 'TEXT'
         }
         
         for col_name, col_type in new_columns.items():
@@ -553,7 +556,7 @@ class Database:
             'was_running_at_shutdown', 'resume_attempts', 'last_checkpoint_phase',
             'src_lang', 'separate_audio', 'tts_engine', 'transcribed_segments',
             'translation_segments', 'background_audio', 'current_task_id',
-            'current_task_name', 'current_task_status'
+            'current_task_name', 'current_task_status', 'whisper_model'
         }
         
         base_updates = {}

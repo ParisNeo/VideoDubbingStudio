@@ -401,15 +401,25 @@ async function handleUpload(e) {
     }
 }
 
-async function loadAndMonitor(taskId) {
+async function loadAndMonitor(taskId, retryCount = 0) {
     currentTaskId = taskId;
-    showWizardStep('state-processing');
     
     try {
         const task = await getJSON(`/api/projects/${taskId}`);
+        // Populate global state immediately
+        Object.assign(currentTaskState, task);
         renderTaskState(task);
         connectWebSocket(taskId);
     } catch(err) {
+        // Handle transient race conditions where task isn't yet committed/visible in DB
+        // Retry up to 5 times with increasing delay
+        if (err.message.includes('404') && retryCount < 5) {
+            const delay = 400 * (retryCount + 1);
+            console.warn(`Task ${taskId} not found yet (syncing DB...), retrying in ${delay}ms...`);
+            setTimeout(() => loadAndMonitor(taskId, retryCount + 1), delay);
+            return;
+        }
+        
         console.error("Failed to load task", err);
         logToTerm(`Error loading task: ${err.message}`, 'error');
     }
@@ -540,7 +550,10 @@ async function renderTaskState(task) {
         try {
             const fullTask = await getJSON(`/api/projects/${task.task_id}`);
             Object.assign(currentTaskState, fullTask);
-        } catch (e) { console.error("Full task fetch failed:", e); }
+        } catch (e) { 
+            // Silent error here because WebSocket messages come frequently and will re-trigger this
+            console.debug("Transient error fetching task details during state sync:", e); 
+        }
     }
 
     // Sync progress bar
@@ -572,14 +585,26 @@ async function renderTaskState(task) {
     
     console.log(`UI State Check: phase=${phase}, status=${status}, hasSegments=${hasSegments}`);
 
-    // Check for validation phases - Priority to more advanced phases based on data availability
-    if (phase === 'awaiting_transcription_review' || (status === 'awaiting_validation' && hasSegments)) {
-        showTranscriptionReview(currentTaskState);
+    // Handle Granular Validation Phases
+    // Fix: Use jumpToPhaseReview to ensure consistent UI routing when returning to a project
+    if (phase === 'awaiting_transcription_review') {
+        jumpToPhaseReview('awaiting_transcription_review');
     }
     else if (phase === 'awaiting_speaker_validation' || (status === 'awaiting_validation' && !hasSegments)) {
-        showSpeakerValidation(currentTaskState);
+        jumpToPhaseReview('awaiting_speaker_validation');
     } 
     else if (phase === 'awaiting_translation_review') {
+        jumpToPhaseReview('awaiting_translation_review');
+    }
+    else if (phase === 'awaiting_audio_validation') {
+        jumpToPhaseReview('awaiting_audio_validation');
+    }
+    else if (status === 'awaiting_validation') {
+        // Generic fallback: check data presence
+        if (hasSegments) jumpToPhaseReview('awaiting_transcription_review');
+        else jumpToPhaseReview('awaiting_speaker_validation');
+    }
+    else if (currentTaskState.status === 'completed' || phase === 'complete') {
         showTranslationReview({
             segments: currentTaskState.segments || [],
             target_language: currentTaskState.tgt_lang || 'en',
@@ -589,15 +614,23 @@ async function renderTaskState(task) {
     else if (phase === 'awaiting_audio_validation') {
         showAudioValidation(currentTaskState);
     }
-    else if (currentTaskState.status === 'completed' || phase === 'complete') {
+    if (currentTaskState.status === 'completed' || phase === 'complete') {
         showWizardStep('state-result');
         const finalVideo = document.getElementById('final-video');
         const downloadBtn = document.getElementById('download-btn');
+        
         if (finalVideo && currentTaskState.output_path) {
-            finalVideo.src = currentTaskState.output_path;
+            // Normalize path for the browser (fix Windows backslashes)
+            let webPath = currentTaskState.output_path.replace(/\\/g, '/');
+            // Ensure path starts with /
+            if (!webPath.startsWith('/')) webPath = '/' + webPath;
+            finalVideo.src = webPath;
+            finalVideo.load();
         }
-        if (downloadBtn && currentTaskState.output_path) {
-            downloadBtn.href = currentTaskState.output_path;
+        
+        if (downloadBtn) {
+            // Force the button to use the API download endpoint instead of the raw path
+            downloadBtn.href = `/api/projects/${currentTaskId}/download`;
         }
     } else if (currentTaskState.status === 'failed' || currentTaskState.status === 'error') {
         logToTerm(`FAILED: ${currentTaskState.error_message || 'Unknown error'}`, 'error');
@@ -662,6 +695,8 @@ function renderStaticChain(task) {
             statusClass = 'completed';
             iconClass = 'fa-check';
         } else if (idx === currentPhaseIdx) {
+            // Highlight this as the current logical step
+            statusClass += ' active-step';
             if (task.status === 'failed' || task.status === 'error') {
                 statusClass = 'failed';
                 iconClass = 'fa-times';
@@ -690,7 +725,7 @@ function renderStaticChain(task) {
                             ['init', 'identifying', 'translating', 'tts_synthesis', 'recomposing'].includes(phaseObj.id);
         
         html += `
-            <div id="task-node-${phaseObj.id}" class="task-node ${statusClass}">
+            <div id="task-node-${phaseObj.id}" class="task-node ${statusClass}" onclick="jumpToPhaseReview('${phaseObj.id}')">
                 <div class="node-icon-wrapper">
                     <i class="node-icon fas ${iconClass}"></i>
                 </div>
@@ -700,7 +735,7 @@ function renderStaticChain(task) {
                         ${idx === currentPhaseIdx && task.message ? `<span class="node-status-text">- ${task.message}</span>` : ''}
                     </div>
                     ${showRestart ? `
-                        <button class="restart-btn" onclick="restartFromTask('${phaseObj.id}')" title="Restart from here">
+                        <button class="restart-btn" onclick="event.stopPropagation(); restartFromTask('${phaseObj.id}')" title="Restart from here">
                             <i class="fas fa-redo-alt"></i>
                         </button>
                     ` : ''}
@@ -713,8 +748,57 @@ function renderStaticChain(task) {
 
 // Removed legacy renderChain and updateTaskProgress functions to prevent UI freezing
 
-// Ensure accessible globally for dynamic button HTML
+// Ensure accessible globally
 window.restartFromTask = restartFromTask;
+window.jumpToPhaseReview = jumpToPhaseReview;
+
+function jumpToPhaseReview(phaseId) {
+    console.log(`Jumping to review for: ${phaseId}`);
+    
+    // Highlight the current selection in the chain
+    document.querySelectorAll('.task-node').forEach(n => n.classList.remove('active-step'));
+    const node = document.getElementById(`task-node-${phaseId}`);
+    if (node) node.classList.add('active-step');
+
+    const hasTranscription = (currentTaskState.segments?.length > 0) || (currentTaskState.transcribed_segments?.length > 0);
+
+    switch(phaseId) {
+        case 'identifying':
+        case 'awaiting_speaker_validation':
+            if (currentTaskState.speaker_config) showSpeakerValidation(currentTaskState);
+            break;
+            
+        case 'transcribing':
+        case 'awaiting_transcription_review':
+            if (hasTranscription) showTranscriptionReview(currentTaskState);
+            else logToTerm("Transcription data not yet available for this phase", "warning");
+            break;
+            
+        case 'translating':
+        case 'awaiting_translation_review':
+            if (hasTranscription) {
+                showTranslationReview({
+                    segments: currentTaskState.segments || [],
+                    target_language: currentTaskState.tgt_lang || 'en',
+                    source_language: currentTaskState.src_lang || 'auto'
+                });
+            } else logToTerm("Translation data not yet available", "warning");
+            break;
+            
+        case 'synthesizing':
+        case 'awaiting_audio_validation':
+            if (currentTaskState.segments) showAudioValidation(currentTaskState);
+            break;
+            
+        case 'recomposing':
+        case 'complete':
+            showWizardStep('state-result');
+            break;
+            
+        default:
+            showWizardStep('state-processing');
+    }
+}
 
 async function restartFromTask(taskName) {
     // Map UI static step IDs to backend phases
@@ -873,10 +957,18 @@ function updateMergeStatus() {
 
 function applySpeakerMerge() {
     const selected = Array.from(speakerMergeState.selected);
+    const groupName = document.getElementById('merge-group-name').value.trim() || `Merged Group ${speakerMergeState.groups.length + 1}`;
+    
     if (selected.length < 2) return;
     
-    // Add as a new merge group
-    speakerMergeState.groups.push([...selected]);
+    // Add as a new merge group with name
+    speakerMergeState.groups.push({
+        ids: [...selected],
+        name: groupName
+    });
+    
+    // Reset name input
+    document.getElementById('merge-group-name').value = '';
     
     // Clear selection
     speakerMergeState.selected.clear();
@@ -912,11 +1004,11 @@ function renderMergeGroups() {
         const tag = document.createElement('div');
         tag.className = 'merge-group-tag';
         
-        const speakerNames = group.map(id => `Spk ${parseInt(id) + 1}`).join(' + ');
+        const idChain = group.ids.map(id => `Spk ${parseInt(id) + 1}`).join(' + ');
         tag.innerHTML = `
             <i class="fas fa-object-group"></i>
-            <span>${speakerNames}</span>
-            <span class="remove-merge" onclick="removeMergeGroup(${idx})" title="Unmerge">
+            <b>${group.name}</b> <small style="opacity:0.8; margin-left:5px">(${idChain})</small>
+            <span class="remove-merge" onclick="removeMergeGroup(${idx})" title="Unmerge" style="margin-left:8px; cursor:pointer;">
                 <i class="fas fa-times"></i>
             </span>
         `;
@@ -1008,6 +1100,7 @@ function showTranslationReview(data) {
                     <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-size:0.85rem; color:var(--text-muted);">
                         <span><i class="fas fa-clock"></i> ${timeStr}</span>
                     </div>
+                    <audio controls src="/api/projects/${currentTaskId}/preview/${seg.idx}" style="width:100%; height:30px; margin-bottom:8px;"></audio>
                     <div class="side-by-side-container" style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
                         <div class="original-column">
                             <label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">
@@ -1039,6 +1132,9 @@ function showTranslationReview(data) {
     const headerActions = document.querySelector('#state-validation .header-actions');
     if (headerActions) {
         headerActions.innerHTML = `
+            <button onclick="showWizardStep('state-processing')" class="btn-icon" title="View Logs">
+                <i class="fas fa-terminal"></i>
+            </button>
             <button id="retry-translation-btn" class="btn-secondary">
                 <i class="fas fa-redo"></i> Retry Translation
             </button>
@@ -1217,21 +1313,32 @@ function showTranscriptionReview(data) {
     let html = '<div class="transcription-review">';
     
     Object.entries(bySpeaker).forEach(([sid, segs]) => {
-        const spkInfo = speakerConfig[sid] || { name: `Speaker ${parseInt(sid)+1}` };
+        // Find the speaker name from the config, ensuring we handle string/int ID mismatches
+        let spkName = `Speaker ${parseInt(sid) + 1}`;
+        if (speakerConfig && (speakerConfig[sid] || speakerConfig[parseInt(sid)])) {
+            const info = speakerConfig[sid] || speakerConfig[parseInt(sid)];
+            if (info.name) spkName = info.name;
+        }
+
         html += `
             <div class="speaker-transcription-group">
                 <div class="spk-header">
                     <span class="avatar">${parseInt(sid) + 1}</span>
-                    <span style="font-weight:600">${spkInfo.name}</span>
+                    <span style="font-weight:600; color: var(--accent);">${spkName}</span>
                 </div>
                 <div class="segments-list">
         `;
         
-        segs.forEach(seg => {
+        segs.forEach((seg, arrayIdx) => {
+            // Use seg.idx if available, otherwise fallback to index in current data array
+            const lookupIdx = seg.idx !== undefined ? seg.idx : segments.indexOf(seg);
             const timeStr = formatTime(seg.start) + ' - ' + formatTime(seg.end);
             html += `
-                <div class="segment-edit-row" data-idx="${seg.idx}" data-speaker="${sid}" data-start="${seg.start}" data-end="${seg.end}">
-                    <div style="font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">${timeStr}</div>
+                <div class="segment-edit-row" data-idx="${lookupIdx}" data-speaker="${sid}" data-start="${seg.start}" data-end="${seg.end}">
+                    <div style="display:flex; justify-content:space-between; margin-bottom:4px; font-size:0.8rem; color:var(--text-muted);">
+                        <span>${timeStr}</span>
+                    </div>
+                    <audio controls preload="none" src="/api/projects/${currentTaskId}/preview/${lookupIdx}" style="width:100%; height:32px; margin-bottom:6px;"></audio>
                     <textarea class="seg-original" style="width:100%">${seg.original_text || ''}</textarea>
                 </div>
             `;

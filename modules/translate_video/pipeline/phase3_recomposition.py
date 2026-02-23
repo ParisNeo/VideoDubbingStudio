@@ -560,13 +560,16 @@ async def run_phase3(
             )
         )
         
+        # Standardization: Ensure the path is relative to the project root for the static mount
+        standard_path = f"outputs/{task_id}/dubbed_video.mp4"
+
         # Final checkpoint
         db.update_task(
             task_id,
             status="completed",
             phase="complete",
             progress=100,
-            output_path=str(final_video_path),
+            output_path=standard_path,
             message="Dubbing complete!"
         )
         
