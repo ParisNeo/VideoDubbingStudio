@@ -434,17 +434,24 @@ function showResults(data) {
     transcriptionResult = data;
 
     const renderSegments = (segments, isTranslation = false) => {
-        return segments.map((seg, idx) => `
-            <div class="segment-review-card" style="background:var(--bg-panel); border:1px solid var(--border); padding:12px; margin-bottom:10px; border-radius:8px;">
-                <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-size:0.8rem; color:var(--text-muted);">
-                    <span><i class="fas fa-user"></i> ${data.speakers?.[seg.speaker_id]?.name || 'Speaker '+(seg.speaker_id+1)}</span>
-                    <span>${formatTime(seg.start)} - ${formatTime(seg.end)}</span>
+        return segments.map((seg, idx) => {
+            const speakerName = data.speakers?.[seg.speaker_id]?.name || `Speaker ${seg.speaker_id + 1}`;
+            return `
+                <div class="segment-review-card">
+                    <div class="seg-meta">
+                        <span class="seg-speaker">
+                            <i class="fas fa-comment-dots"></i> ${speakerName}
+                        </span>
+                        <span class="seg-time">${formatTime(seg.start)} — ${formatTime(seg.end)}</span>
+                    </div>
+                    <audio controls class="studio-audio" src="/api/projects/${currentTaskId}/preview/${idx}"></audio>
+                    <textarea class="edit-segment-text" 
+                        data-idx="${idx}" 
+                        data-type="${isTranslation ? 'trans' : 'orig'}" 
+                        placeholder="Transcription text...">${isTranslation ? (seg.translated_text || '') : (seg.original_text || '')}</textarea>
                 </div>
-                <audio controls src="/transcribe/preview/${currentTaskId}/${idx}" style="width:100%; height:32px; margin-bottom:8px;"></audio>
-                <textarea class="edit-segment-text" data-idx="${idx}" data-type="${isTranslation ? 'trans' : 'orig'}" 
-                    style="width:100%; min-height:60px;">${isTranslation ? seg.translated_text : seg.original_text}</textarea>
-            </div>
-        `).join('');
+            `;
+        }).join('');
     };
 
     const origContainer = document.getElementById('transcribe-orig');

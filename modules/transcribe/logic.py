@@ -65,24 +65,50 @@ def whisper_inference(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+async def get_robust_duration(file_path: str) -> float:
+    """Get duration for audio or video files using librosa or ffprobe."""
+    import librosa
+    import subprocess
+    try:
+        return librosa.get_duration(path=file_path)
+    except:
+        try:
+            cmd = [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", file_path
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            return float(res.stdout.strip())
+        except:
+            # Last resort
+            info = sf.info(file_path)
+            return info.duration
+
 async def process_transcription(file_path: str, translate_to: Optional[str] = None):
     """Refactored simple transcription with robust format detection."""
     import librosa
     
-    # Use librosa for duration (more robust than soundfile for varying formats)
-    try:
-        duration = librosa.get_duration(path=file_path)
-    except Exception as e:
-        print(f"[Transcribe] Librosa duration check failed, trying fallback: {e}")
-        # Final fallback for duration
-        info = sf.info(file_path)
-        duration = info.duration
+    duration = await get_robust_duration(file_path)
 
     if duration > 30:
         return await process_long_audio(file_path, translate_to)
     
-    # Load with librosa to handle non-standard WAV/MP3/MP4 containers
-    audio_np, sr = librosa.load(file_path, sr=16000, mono=True)
+    # Extract audio if it's a video file to avoid memory issues and ensure clean load
+    ext = Path(file_path).suffix.lower()
+    if ext in ['.mp4', '.mkv', '.mov', '.avi', '.webm']:
+        temp_wav = Path(file_path).with_suffix('.temp_audio.wav')
+        import subprocess
+        subprocess.run([
+            "ffmpeg", "-y", "-i", file_path,
+            "-vn", "-acodec", "pcm_s16le",
+            "-ar", "16000", "-ac", "1",
+            str(temp_wav)
+        ], capture_output=True)
+        audio_np, sr = librosa.load(str(temp_wav), sr=16000, mono=True)
+        if temp_wav.exists(): temp_wav.unlink()
+    else:
+        # Load with librosa to handle non-standard WAV/MP3 containers
+        audio_np, sr = librosa.load(file_path, sr=16000, mono=True)
     if len(audio_np.shape) > 1: audio_np = audio_np.mean(axis=1)
     if sr != 16000:
         import librosa
@@ -107,8 +133,7 @@ async def process_long_audio(file_path: str, translate_to: Optional[str] = None)
     import gc
     from modules.translate_video.pipeline.phase1_diarization import run_vad
     
-    info = sf.info(file_path)
-    total_duration = info.duration
+    total_duration = await get_robust_duration(file_path)
     
     # 1. Use VAD to find natural silence gaps as split points
     speech_regions = run_vad(file_path)
