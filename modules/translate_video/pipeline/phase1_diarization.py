@@ -139,8 +139,8 @@ def extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) -
 # -------------------------------------------------------------------------------------------------------------------------------
 
 def run_vad(audio_path: str, 
-            threshold: float = 0.5,
-            min_speech_duration_ms: int = 250) -> List[Dict[str, float]]:
+            threshold: float = 0.35, # Lowered from 0.5 to be more sensitive
+            min_speech_duration_ms: int = 150) -> List[Dict[str, float]]: # Lowered for short words
     """
     Run Silero VAD on audio file.
     
@@ -167,7 +167,7 @@ def run_vad(audio_path: str,
         sampling_rate=16000,
         threshold=threshold,
         min_speech_duration_ms=min_speech_duration_ms,
-        min_silence_duration_ms=500
+        min_silence_duration_ms=300 # Lowered from 500 to catch faster speakers
     )
     
     # Convert to seconds
@@ -363,6 +363,11 @@ class SpeakerIdentifier:
             progress_callback("Running voice activity detection...", 0, 100)
         
         speech_segments = run_vad(audio_path)
+
+        # Fallback: If VAD is too strict and finds nothing/very little, try ultra-sensitive
+        if len(speech_segments) <= 1:
+            logger.info("VAD found 1 or fewer segments. Retrying with ultra-sensitive settings...")
+            speech_segments = run_vad(audio_path, threshold=0.2, min_silence_duration_ms=200)
         
         if progress_callback:
             progress_callback(f"Found {len(speech_segments)} speech segments", 20, 100)
