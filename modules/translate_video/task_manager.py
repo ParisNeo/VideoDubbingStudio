@@ -129,10 +129,18 @@ class TaskManager:
             # PHASE 3: TRANSLATION (After Transcription Review)
             # ----------------------------------------------------------------
             if phase == 'translating':
-                await report("translating", 45, "Starting translation...")
-                
-                # Get segments
-                seg_data = task.get('transcribed_segments', []) or task.get('segments', [])
+                # Check if we already have translated segments (manual validation just happened)
+                # If they exist, skip the LLM translation and go straight to synthesis.
+                current_segments = task.get('segments', [])
+                if current_segments and all(s.get('translated_text') for s in current_segments):
+                    print(f"Task {task_id} already translated, moving to synthesis")
+                    db.update_task(task_id, phase='synthesizing')
+                    phase = 'synthesizing' # Force local update for immediate execution
+                else:
+                    await report("translating", 45, "Starting translation...")
+                    
+                    # Get segments
+                    seg_data = task.get('transcribed_segments', []) or task.get('segments', [])
                 if not seg_data: raise ValueError("No segments for translation")
                 segments = [TranslationSegment.from_dict(s) for s in seg_data]
                 

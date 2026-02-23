@@ -642,9 +642,9 @@ function renderStaticChain(task) {
         'awaiting_speaker_validation': 1,
         'transcribing': 2, 'running_transcription': 2,
         'awaiting_transcription_review': 3,
-        'translating': 4,
+        'translating': 4, 'running_translation': 4,
         'awaiting_translation_review': 5,
-        'synthesizing': 6, 'tts_synthesis': 6,
+        'synthesizing': 6, 'tts_synthesis': 6, 'running_synthesis': 6,
         'awaiting_audio_validation': 7,
         'recomposing': 8,
         'complete': 9, 'completed': 9

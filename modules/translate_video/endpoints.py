@@ -534,7 +534,7 @@ async def handle_translation_validation(task_id: str, config: Any):
         db.update_task(
             task_id,
             segments=segments,
-            phase='translating',  # Now go to TTS synthesis
+            phase='synthesizing',  # Changed from 'translating' to avoid re-translation loop
             status='queued',
             was_running_at_shutdown=0,
             message='Translation validated - starting voice synthesis...',
