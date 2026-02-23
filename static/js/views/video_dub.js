@@ -1312,9 +1312,9 @@ function showAudioValidation(data) {
 
 // NEW: Submit translation review
 async function submitTranslationReview() {
-    const editedSegments = [];
+    const edited_segments = []; // Fixed variable name to match usage below
     document.querySelectorAll('.translation-edit-row').forEach(row => {
-        editedSegments.push({
+        edited_segments.push({
             idx: parseInt(row.dataset.idx),
             original_text: row.querySelector('.original-text').textContent.trim(),
             translated_text: row.querySelector('.seg-translated').value
@@ -1329,8 +1329,10 @@ async function submitTranslationReview() {
     btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting Voice Synthesis...';
 
     try {
+        // Send as a wrapped object to match backend expectations
         await postJSON(`/api/projects/${currentTaskId}/validate-translation`, { 
-            segments: editedSegments,
+            segments: edited_segments,
+            edited_segments: edited_segments,
             proceed_to_tts: true
         });
         showWizardStep('state-processing');

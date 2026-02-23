@@ -262,10 +262,13 @@ async def resume_task(task_id: str):
         if not task:
             raise HTTPException(404, "Project not found")
         
-        # The only strict rule for resuming is that the task MUST NOT currently be running.
+        # If the task is already in active_tasks, we'll force-stop it first to allow a clean resume.
         if task_id in task_manager.active_tasks:
-            raise HTTPException(400, "Task is already actively running")
-        
+            print(f"Task {task_id} is hung or running, force-stopping before resume...")
+            await task_manager.cancel_task(task_id)
+            # Short sleep to allow cancellation to propagate
+            await asyncio.sleep(0.5)
+
         await task_manager.resume_task(task_id)
         return {
             "task_id": task_id,
@@ -491,17 +494,18 @@ async def handle_audio_validation(task_id: str):
         raise HTTPException(500, f"Audio validation failed: {str(e)}")
 
 
-async def handle_translation_validation(task_id: str, config: Dict[str, Any]):
+async def handle_translation_validation(task_id: str, config: Any):
     """
     Handle translation review and confirmation.
-    
-    This is the SECOND validation step - users review translations and confirm
-    before TTS synthesis begins.
     """
     try:
-        # Extract edited translations if provided
-        edited_segments = config.get('edited_segments')  # User may have edited translations
-        proceed_to_tts = config.get('proceed_to_tts', True)
+        # Robust extraction: handle if config is a list or a dict
+        if isinstance(config, list):
+            edited_segments = config
+            proceed_to_tts = True
+        else:
+            edited_segments = config.get('edited_segments')
+            proceed_to_tts = config.get('proceed_to_tts', True)
         
         existing_task = db.get_task(task_id)
         if not existing_task:

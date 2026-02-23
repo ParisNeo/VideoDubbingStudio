@@ -23,9 +23,16 @@ class TaskManager:
     async def start_task(self, task_id: str, is_resume: bool = False):
         """Start or resume a task pipeline."""
         async with self._lock:
+            # Check if task is already running
             if task_id in self.active_tasks:
-                print(f"Task {task_id} already running, skipping")
-                return
+                existing_task = self.active_tasks[task_id]
+                if not existing_task.done():
+                    print(f"Task {task_id} is already running and active, skipping start request")
+                    return
+                else:
+                    # Clean up completed but un-removed task reference
+                    print(f"Cleaning up stale task reference for {task_id}")
+                    self.active_tasks.pop(task_id, None)
             
             task = db.get_task(task_id)
             if not task:
