@@ -620,12 +620,17 @@ async function renderTaskState(task) {
         const downloadBtn = document.getElementById('download-btn');
         
         if (finalVideo && currentTaskState.output_path) {
-            // Normalize path for the browser (fix Windows backslashes)
+            // Normalize path for the browser
             let webPath = currentTaskState.output_path.replace(/\\/g, '/');
-            // Ensure path starts with /
             if (!webPath.startsWith('/')) webPath = '/' + webPath;
-            finalVideo.src = webPath;
+            
+            // Add a cache-buster to force the video to reload if re-rendered
+            const cacheBuster = `?t=${new Date().getTime()}`;
+            finalVideo.src = webPath + cacheBuster;
+            
+            // Ensure player is ready
             finalVideo.load();
+            console.log("Loading final video from:", webPath);
         }
         
         if (downloadBtn) {
@@ -680,11 +685,15 @@ function renderStaticChain(task) {
         'synthesizing': 6, 'tts_synthesis': 6, 'running_synthesis': 6,
         'awaiting_audio_validation': 7,
         'recomposing': 8,
-        'complete': 9, 'completed': 9
+        'complete': 9, 'completed': 9, 'complete': 9
     };
     
     currentPhaseIdx = phaseMap[ph] !== undefined ? phaseMap[ph] : 0;
-    if (task.status === 'completed') currentPhaseIdx = 9;
+    
+    // Force completion if status says so
+    if (task.status === 'completed' || task.status === 'done' || ph === 'complete') {
+        currentPhaseIdx = 9;
+    }
 
     let html = '';
     phases.forEach((phaseObj, idx) => {

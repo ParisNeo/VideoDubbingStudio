@@ -553,18 +553,30 @@ class TTSEngine:
                         is_silence = True
                         segment.error = f"TTS failed, using silence: {str(synth_error)[:100]}"
                 
-                # Time-stretch to match duration if needed (only for non-silence)
+                # Time-stretch to match duration exactly (Prevents Overlap)
                 if not is_silence:
                     current_duration = len(audio) / 24000
                     
-                    # deactivate time stretching
-                    # if abs(current_duration - target_duration) > 0.1:
-                    #     try:
-                    #         import librosa
-                    #         rate = current_duration / target_duration
-                    #         audio = librosa.effects.time_stretch(audio, rate=rate)
-                    #     except Exception as e:
-                    #         logger.warning(f"Time-stretch failed for segment {segment.idx}: {e}")
+                    # If the audio is more than 50ms different from target, stretch it
+                    if abs(current_duration - target_duration) > 0.05:
+                        try:
+                            import librosa
+                            # rate > 1.0 makes it faster (shorter), < 1.0 makes it slower (longer)
+                            rate = current_duration / target_duration
+                            
+                            # Safety limits for extreme stretching
+                            rate = max(0.5, min(rate, 2.0))
+                            
+                            audio = librosa.effects.time_stretch(audio, rate=rate)
+                            # Ensure we have the exact number of samples required
+                            target_samples = int(target_duration * 24000)
+                            if len(audio) > target_samples:
+                                audio = audio[:target_samples]
+                            elif len(audio) < target_samples:
+                                audio = np.pad(audio, (0, target_samples - len(audio)))
+                                
+                        except Exception as e:
+                            logger.warning(f"Time-stretch failed for segment {segment.idx}: {e}")
             
             # Save
             output_path = output_dir / f"segment_{segment.idx:04d}.wav"

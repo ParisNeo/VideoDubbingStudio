@@ -30,31 +30,6 @@ async def upload_for_transcription(
     whisper_model: str = Form("large-v2"),
     vad_threshold: float = Form(0.20)
 ):
-    # This now creates a standard task that dashboard can see
-    task_id = str(uuid.uuid4())
-    file_path = UPLOAD_DIR / f"{task_id}_{file.filename}"
-    with open(file_path, "wb") as f: shutil.copyfileobj(file.file, f)
-    
-    db.create_task(task_id, file.filename, str(file_path))
-    db.update_task(task_id, 
-        source="transcribe", 
-        src_lang=src_lang, 
-        tgt_lang=tgt_lang,
-        whisper_model=whisper_model,
-        vad_threshold=vad_threshold,
-        status="queued",
-        phase="identifying" if use_diarization == "true" else "transcribing"
-    )
-    # Logic to route to task_manager follows...
-    """
-    Upload audio/video for transcription.
-    
-    Args:
-        file: Audio or video file
-        src_lang: Source language code (auto for auto-detect)
-        tgt_lang: Target language for translation (optional)
-        use_diarization: Whether to perform speaker diarization
-    """
     try:
         task_id = str(uuid.uuid4())
         do_diarization = use_diarization.lower() in ('true', '1', 'yes', 'on')
@@ -63,7 +38,7 @@ async def upload_for_transcription(
         with open(file_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
         
-        # Register in Database so it shows on Dashboard
+        # 1. Register in Database
         db.create_task(task_id, file.filename, str(file_path))
         db.update_task(
             task_id,
@@ -72,13 +47,22 @@ async def upload_for_transcription(
             tgt_lang=tgt_lang or "",
             whisper_model=whisper_model,
             vad_threshold=vad_threshold,
-            separate_audio=False,
             status='queued',
-            phase='identifying' if do_diarization else 'transcribing',
-            was_running_at_shutdown=0
+            phase='identifying' if do_diarization else 'transcribing'
         )
+
+        # 2. CRITICAL: Initialize task in active_tasks memory for WebSocket sync
+        active_tasks[task_id] = {
+            "task_id": task_id,
+            "file_path": str(file_path),
+            "src_lang": src_lang,
+            "tgt_lang": tgt_lang,
+            "status": "queued",
+            "progress": 0,
+            "speakers_confirmed": False
+        }
         
-        # Use Task Manager to handle lifecycle
+        # 3. Start background worker
         if do_diarization:
             background_tasks.add_task(process_with_diarization_task, task_id)
         else:
@@ -152,10 +136,23 @@ async def transcription_websocket(websocket: WebSocket, task_id: str):
     """WebSocket for real-time transcription updates with diarization."""
     await websocket.accept()
     
+    # Try to recover task from database if not in memory (e.g. page refresh)
     if task_id not in active_tasks:
-        await websocket.send_json({"type": "error", "message": "Task not found"})
-        await websocket.close()
-        return
+        db_task = db.get_task(task_id)
+        if db_task and db_task.get('source') == 'transcribe':
+            active_tasks[task_id] = {
+                "task_id": task_id,
+                "file_path": db_task.get('file_path'),
+                "src_lang": db_task.get('src_lang'),
+                "tgt_lang": db_task.get('tgt_lang'),
+                "status": db_task.get('status'),
+                "progress": db_task.get('progress', 0),
+                "speakers_confirmed": False
+            }
+        else:
+            await websocket.send_json({"type": "error", "message": "Task not found"})
+            await websocket.close()
+            return
     
     task = active_tasks[task_id]
     task["websocket"] = websocket
