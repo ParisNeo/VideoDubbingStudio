@@ -36,9 +36,9 @@ logger = logging.getLogger("phase1_diarization")
 _diarization_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # DATA MODELS
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 class SpeechSegment:
     """Represents a detected speech segment."""
@@ -111,9 +111,9 @@ class DiarizationResult:
         }
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # AUDIO PROCESSING
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 def extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) -> str:
     """Extract audio from video using FFmpeg."""
@@ -134,9 +134,9 @@ def extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) -
     return output_path
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # VAD (VOICE ACTIVITY DETECTION)
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 def run_vad(audio_path: str, 
             threshold: float = 0.5,
@@ -177,9 +177,9 @@ def run_vad(audio_path: str,
     ]
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # SPEAKER EMBEDDING & CLUSTERING
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 class SpeakerIdentifier:
     """
@@ -403,9 +403,9 @@ class SpeakerIdentifier:
         return segments, assignments, num_speakers
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # SAMPLE EXTRACTION & CONFIG GENERATION
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 def extract_speaker_samples(
     audio_path: str,
@@ -464,9 +464,9 @@ def extract_speaker_samples(
     return speaker_samples, speaker_config
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # TRANSCRIPTION
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 def transcribe_segments(
     audio_path: str,
@@ -554,169 +554,133 @@ def transcribe_segments(
     return segments
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # MAIN PHASE 1 ENTRY POINT
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
-async def run_phase1(
+async def run_diarization_phase(
     task_id: str,
     video_path: str,
-    source_language: str = "auto",
-    progress_callback: Optional[Callable[[str, int, str], None]] = None,
-    checkpoint_after_diarization: bool = True
-) -> DiarizationResult:
-    """
-    Run complete Phase 1 pipeline.
-    
-    Args:
-        task_id: The task ID
-        video_path: Path to input video
-        source_language: Source language code
-        progress_callback: Called with (phase, percent, message)
-        checkpoint_after_diarization: If True, save checkpoint after speaker ID 
-                                      (allows re-running with different clustering params)
-    
-    Returns:
-        DiarizationResult with all Phase 1 outputs
-    
-    Raises:
-        RuntimeError: If any step fails
-    """
-    
-    async def report(phase: str, percent: int, message: str):
-        if progress_callback:
-            await progress_callback(phase, percent, message)
-        logger.info(f"[Phase 1] {percent}%: {message}")
-    
+    progress_callback: Optional[Callable] = None
+):
+    """Stage 1: Extract audio and identify speakers."""
+    import functools
+    loop = asyncio.get_running_loop()
+
+    async def report(phase: str, pct: int, msg: str):
+        if progress_callback: await progress_callback(phase, pct, msg)
+        logger.info(f"[Diarization] {pct}%: {msg}")
+
     try:
-        # Step 1: Audio Extraction
-        await report("extraction", 5, "Extracting audio with FFmpeg...")
-        
+        # 1. Extraction
+        await report("identifying", 5, "Extracting audio...")
         master_wav = str(Path("temp_chunks") / task_id / "master.wav")
         extract_audio(video_path, master_wav)
-        
-        await report("extraction", 15, "Audio extracted successfully")
-        
-        # Step 2: Speaker Identification
-        await report("diarization", 20, "Running speaker diarization...")
-        
+
+        # 2. Identification
+        await report("identifying", 15, "Running diarization...")
         identifier = SpeakerIdentifier(max_speakers=10)
         
-        def diar_progress(msg, pct, total):
-            asyncio.create_task(report("diarization", pct, msg))
-        
-        segments, assignments, num_speakers = identifier.run(
-            master_wav,
-            progress_callback=diar_progress
+        def diar_progress_sync(msg, pct, total):
+            # Use threadsafe call to ensure updates don't race
+            current_pct = 15 + int(pct * 0.5)
+            asyncio.run_coroutine_threadsafe(report("identifying", current_pct, msg), loop)
+            
+        # Run synchronous diarization in executor to keep event loop responsive
+        segments, assignments, num_speakers = await loop.run_in_executor(
+            None, functools.partial(identifier.run, master_wav, diar_progress_sync)
         )
-        
-        await report("diarization", 70, f"Diarization complete: {num_speakers} speakers")
-        
-        # Step 3: Extract speaker samples
-        await report("samples", 75, "Generating reference samples...")
-        
-        def sample_progress(msg):
-            asyncio.create_task(report("samples", 80, msg))
-        
-        speaker_samples, speaker_config = extract_speaker_samples(
-            master_wav, segments, task_id, sample_progress
-        )
-        
-        await report("samples", 85, "Samples extracted")
-        
-        # CHECKPOINT: Save state after diarization (before transcription)
-        # This allows resuming from transcription if needed
+
+        # 3. Samples
+        await report("identifying", 70, "Extracting speaker samples...")
+        speaker_samples, speaker_config = extract_speaker_samples(master_wav, segments, task_id)
+
+        # Update DB and stop for validation - CRITICAL: Do not report "complete" here
+        # to prevent overwriting the 'awaiting_speaker_validation' phase.
         db.update_task(
             task_id,
             segments=[s.to_dict() for s in segments],
-            assignments=assignments,
-            speaker_count=num_speakers,
-            speaker_samples=speaker_samples,
             speaker_config=speaker_config,
+            speaker_samples=speaker_samples,
             master_audio=master_wav,
-            phase="identifying",
-            status="processing",
-            progress=85,
-            message="Speaker identification complete - starting transcription..."
+            phase="awaiting_speaker_validation",
+            status="awaiting_validation",
+            progress=35,
+            message="Please confirm detected speakers"
         )
         
-        if checkpoint_after_diarization:
-            logger.info(f"Checkpoint saved after diarization for task {task_id}")
+        from ..state import broadcast_to_task
+        await broadcast_to_task(task_id, {
+            'type': 'speaker_validation_ready',
+            'data': {
+                'speaker_config': speaker_config,
+                'phase': 'awaiting_speaker_validation',
+                'status': 'awaiting_validation'
+            }
+        })
         
-        # Step 4: Transcription
-        await report("transcription", 85, "Transcribing speech segments...")
+        logger.info(f"Diarization finished for {task_id}. Phase set to awaiting_speaker_validation")
+    except Exception as e:
+        logger.error(f"Diarization phase failed: {traceback.format_exc()}")
+        db.update_task(task_id, status="failed", error_message=str(e))
+
+async def run_transcription_phase(
+    task_id: str,
+    source_language: str = "auto",
+    progress_callback: Optional[Callable] = None
+):
+    """Stage 2: Transcribe segments after speaker confirmation."""
+    import functools
+    loop = asyncio.get_running_loop()
+
+    async def report(phase: str, pct: int, msg: str):
+        if progress_callback: await progress_callback(phase, pct, msg)
+        logger.info(f"[Transcription] {pct}%: {msg}")
+
+    try:
+        task = db.get_task(task_id)
+        segments = [SpeechSegment.from_dict(s) for s in task.get('segments', [])]
+        master_audio = task.get('master_audio')
+
+        await report("transcribing", 10, "Starting Whisper transcription...")
         
-        def transcribe_progress(current, total):
-            pct = 85 + int((current / total) * 10)
-            asyncio.create_task(report("transcription", pct, 
-                f"Transcribed {current}/{total} segments"))
-        
-        segments = transcribe_segments(
-            master_wav, segments, source_language, transcribe_progress
+        def trans_progress_sync(cur, tot):
+            current_pct = 10 + int((cur / tot) * 40)
+            asyncio.run_coroutine_threadsafe(report("transcribing", current_pct, f"Transcribed {cur}/{tot}"), loop)
+
+        # Run transcription in executor
+        segments = await loop.run_in_executor(
+            None, functools.partial(transcribe_segments, master_audio, segments, source_language, trans_progress_sync)
         )
-        
-        await report("transcription", 95, "Transcription complete")
-        
-        # Final checkpoint: Ready for validation - NOW WITH TRANSCRIPTION REVIEW
+
+        # Stop for Transcription Review
         db.update_task(
             task_id,
             segments=[s.to_dict() for s in segments],
             transcribed_segments=[s.to_dict() for s in segments],
-            phase="awaiting_validation",
+            phase="awaiting_transcription_review",
             status="awaiting_validation",
-            progress=35,
-            message="Phase 1 complete - review and edit transcriptions below"
+            progress=50,
+            message="Please review the transcription text"
         )
         
-        # Send transcription data to UI via WebSocket
         from ..state import broadcast_to_task
         await broadcast_to_task(task_id, {
             'type': 'transcription_ready',
             'data': {
                 'segments': [s.to_dict() for s in segments],
-                'speaker_config': speaker_config,
-                'speaker_samples': speaker_samples,
-                'can_edit': True,
-                'next_phase': 'translation_review'  # Will go to translation review next
+                'phase': 'awaiting_transcription_review',
+                'status': 'awaiting_validation'
             }
         })
-        
-        await report("complete", 100, "Phase 1 complete - awaiting transcription review")
-        
-        return DiarizationResult(
-            segments=segments,
-            speaker_count=num_speakers,
-            speaker_samples=speaker_samples,
-            assignments=assignments,
-            master_audio=master_wav,
-            speaker_config=speaker_config
-        )
-        
     except Exception as e:
-        tb_str = traceback.format_exc()
-        logger.error(f"Phase 1 failed:\n{tb_str}")
-        
-        db.update_task(
-            task_id,
-            status="failed",
-            phase="identifying",
-            error_message=f"Phase 1 failed: {str(e)}",
-            error_traceback=tb_str
-        )
-        
-        raise RuntimeError(f"Phase 1 diarization failed: {str(e)}") from e
-
-
-# Convenience function for non-async callers
-def run_phase1_sync(*args, **kwargs) -> DiarizationResult:
-    """Synchronous wrapper for run_phase1."""
-    return asyncio.run(run_phase1(*args, **kwargs))
-
+        logger.error(f"Transcription phase failed: {traceback.format_exc()}")
+        db.update_task(task_id, status="failed", error_message=str(e))
 
 # Export for workflow tasks
 __all__ = [
-    'run_phase1',
-    'run_phase1_sync',
+    'run_diarization_phase',
+    'run_transcription_phase',
     'DiarizationResult',
     'SpeechSegment',
     'extract_audio',

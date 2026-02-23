@@ -7,7 +7,7 @@ from .project_manager import append_log
 from .state import broadcast_to_task
 
 # Import Pipeline Phases Directly
-from .pipeline.phase1_diarization import run_phase1
+from .pipeline.phase1_diarization import run_diarization_phase, run_transcription_phase
 from .pipeline.phase2_translation import run_phase2
 from .pipeline.phase3_recomposition import run_phase3
 from .state import broadcast_to_task
@@ -86,46 +86,47 @@ class TaskManager:
                     "Waiting for user review..." if phase == 'awaiting_validation' else "Waiting for translation review...")
                 return  # CRITICAL: Early return to prevent re-running
             
-            # Phase 1: Speaker Identification + Transcription
+            # Import new granular phases
+            from .pipeline.phase2_translation import TranslationEngine, TTSEngine, TranslationSegment
+            import functools
+
+            # ----------------------------------------------------------------
+            # PHASE 1: DIARIZATION (Identification)
+            # ----------------------------------------------------------------
             if phase in ['init', 'identifying']:
                 await report("identifying", 5, "Starting speaker identification...")
                 
-                result = await run_phase1(
+                # This stops at 'awaiting_speaker_validation'
+                await run_diarization_phase(
                     task_id=task_id,
                     video_path=video_path,
+                    progress_callback=report
+                )
+                return
+
+            # ----------------------------------------------------------------
+            # PHASE 2: TRANSCRIPTION (After Speaker Validation)
+            # ----------------------------------------------------------------
+            if phase == 'transcribing':
+                await report("transcribing", 25, "Starting transcription...")
+                
+                # This stops at 'awaiting_transcription_review'
+                await run_transcription_phase(
+                    task_id=task_id,
                     source_language=task.get('src_lang', 'auto'),
                     progress_callback=report
                 )
-                
-                # Phase 1 ends at 'awaiting_validation' - user reviews transcriptions
                 return
-            
-            # Phase 1.5: Translation Review (after transcription validation)
-            # This phase runs the actual translation and sends results to UI
-            if phase == 'awaiting_translation_review':
-                # This shouldn't auto-run - we need user to trigger translation
-                # But if we have edited_transcriptions, we should process them
-                if task.get('edited_transcriptions'):
-                    await report("translating", 40, "Processing edited transcriptions...")
-                    # Continue to translation phase below
-                else:
-                    # Just waiting for user to trigger translation
-                    await report("awaiting_translation_review", 40, "Waiting for user to start translation...")
-                    return
-            
-            # Phase 1.5: Actually run translation (triggered by user)
-            if phase == 'running_translation':
-                await report("translating", 40, "Starting translation...")
-                
-                # Import here to avoid circular dependencies
-                from .pipeline.phase2_translation import TranslationEngine
+
+            # ----------------------------------------------------------------
+            # PHASE 3: TRANSLATION (After Transcription Review)
+            # ----------------------------------------------------------------
+            if phase == 'translating':
+                await report("translating", 45, "Starting translation...")
                 
                 # Get segments
                 seg_data = task.get('transcribed_segments', []) or task.get('segments', [])
-                if not seg_data:
-                    raise ValueError("No transcribed segments found")
-                
-                from .pipeline.phase2_translation import TranslationSegment
+                if not seg_data: raise ValueError("No segments for translation")
                 segments = [TranslationSegment.from_dict(s) for s in seg_data]
                 
                 # Run translation
@@ -134,25 +135,27 @@ class TaskManager:
                     source_language=task.get('src_lang', 'auto')
                 )
                 
+                loop = asyncio.get_running_loop()
                 def trans_progress(current, total):
-                    pct = 40 + int((current / total) * 20)
-                    asyncio.create_task(report("translating", pct, 
-                        f"Translated {current}/{total} segments"))
+                    pct = 45 + int((current / total) * 15)
+                    asyncio.run_coroutine_threadsafe(
+                        report("translating", pct, f"Translated {current}/{total} segments"), loop
+                    )
                 
-                segments = translator.translate_batch(segments, trans_progress)
+                segments = await loop.run_in_executor(
+                    None, functools.partial(translator.translate_batch, segments, progress_callback=trans_progress)
+                )
                 
-                # Save translated segments
+                # Stop for Translation Review
                 db.update_task(
                     task_id,
                     segments=[s.to_dict() for s in segments],
-                    phase='awaiting_translation_review',  # Go back to review state
-                    status='awaiting_validation',  # Need user validation
+                    phase='awaiting_translation_review',
+                    status='awaiting_validation',
                     progress=60,
                     message="Translation complete - review and confirm"
                 )
                 
-                # Send to frontend
-                from .state import broadcast_to_task
                 await broadcast_to_task(task_id, {
                     'type': 'translation_ready',
                     'data': {
@@ -162,74 +165,82 @@ class TaskManager:
                         'can_edit': True
                     }
                 })
-                
-                await report("awaiting_translation_review", 60, "Translation complete - awaiting review")
                 return
-            
-            # Phase 2: TTS Synthesis (after translation validation)
-            if phase in ['translating', 'tts_synthesis']:
+
+            # ----------------------------------------------------------------
+            # PHASE 4: TTS SYNTHESIS (After Translation Review)
+            # ----------------------------------------------------------------
+            if phase == 'synthesizing':
                 speaker_config = task.get('speaker_config')
-                if not speaker_config:
-                    raise ValueError("No speaker_config - validation required")
+                if not speaker_config: raise ValueError("No speaker_config")
                 
-                # Get potentially edited segments
                 seg_data = task.get('segments', [])
-                if not seg_data:
-                    raise ValueError("No segments - run translation review first")
+                if not seg_data: raise ValueError("No segments for TTS")
                 
-                await report("tts_synthesis", 65, "Starting voice synthesis...")
-                
-                # Run TTS only (translation already done)
-                from .pipeline.phase2_translation import TTSEngine, TranslationSegment
-                import numpy as np
+                await report("synthesizing", 65, "Starting voice synthesis...")
                 
                 output_dir = Path("temp_chunks") / task_id / "synthesized"
                 output_dir.mkdir(parents=True, exist_ok=True)
                 
                 segments = [TranslationSegment.from_dict(s) for s in seg_data]
-                tts_engine = task.get('tts_engine', 'f5')
+                tts = TTSEngine(
+                    task.get('tts_engine', 'f5'), 
+                    speaker_config, 
+                    target_language=task.get('tgt_lang', 'en')
+                )
                 
-                tts = TTSEngine(tts_engine, speaker_config)
-                
-                # Process in batches
-                batch_size = 10
+                batch_size = 5
                 total = len(segments)
+                loop = asyncio.get_running_loop()
+                
+                def threadsafe_report(phase_str, pct, msg):
+                    asyncio.run_coroutine_threadsafe(report(phase_str, pct, msg), loop)
                 
                 for i in range(0, total, batch_size):
                     batch = segments[i:i + batch_size]
-                    batch_num = i // batch_size + 1
-                    total_batches = (total + batch_size - 1) // batch_size
-                    
-                    await report("tts_synthesis", 
-                        65 + int((i / total) * 15),
-                        f"Synthesizing batch {batch_num}/{total_batches}")
                     
                     def synth_progress(current, total_in_batch):
                         overall = i + current
-                        pct = 65 + int((overall / total) * 15)
-                        asyncio.create_task(report("tts_synthesis", pct,
-                            f"Synthesized {overall}/{total} segments"))
+                        pct = 65 + int((overall / total) * 20)
+                        threadsafe_report("synthesizing", pct, f"Synthesized {overall}/{total} segments")
                     
-                    tts.synthesize_batch(batch, output_dir, synth_progress)
-                    
-                    # Save progress
+                    await loop.run_in_executor(
+                        None, functools.partial(tts.synthesize_batch, batch, output_dir, progress_callback=synth_progress)
+                    )
+                    # Save incremental progress
                     db.update_task(task_id, segments=[s.to_dict() for s in segments])
                 
-                await report("tts_synthesis", 80, "Voice synthesis complete")
-                
-                # Move to Phase 3
+                # Stop for Audio Review (NEW STEP)
                 db.update_task(
                     task_id,
                     segments=[s.to_dict() for s in segments],
                     translation_segments=[s.to_dict() for s in segments],
-                    phase="recomposing",
-                    status="queued",
-                    progress=80,
-                    message="TTS complete - starting final assembly..."
+                    phase="awaiting_audio_validation",
+                    status="awaiting_validation",
+                    progress=85,
+                    message="TTS complete - Listen to generated audio before final mix"
                 )
                 
-                # Continue to Phase 3
-                await self._run_pipeline(task_id, db.get_task(task_id), is_resume)
+                await broadcast_to_task(task_id, {
+                    'type': 'audio_ready',
+                    'data': {
+                        'segments': [s.to_dict() for s in segments]
+                    }
+                })
+                return
+
+            # ----------------------------------------------------------------
+            # PHASE 5: RECOMPOSITION (Final Assembly)
+            # ----------------------------------------------------------------
+            if phase == 'recomposing':
+                await report("recomposing", 90, "Starting final assembly...")
+                
+                result = await run_phase3(
+                    task_id=task_id,
+                    original_video_path=video_path,
+                    use_demucs=task.get('separate_audio', False),
+                    progress_callback=report
+                )
                 return
             
             # Phase 3: Final Assembly

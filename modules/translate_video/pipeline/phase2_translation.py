@@ -36,9 +36,9 @@ from core.database import db
 logger = logging.getLogger("phase2_translation")
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # DATA MODELS
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 class TranslationSegment:
     """Represents a segment through Phase 2 processing."""
@@ -111,9 +111,9 @@ class TranslationResult:
         return self.failed_count == 0 and self.synthesized_count > 0
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # TRANSLATION
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 class TranslationEngine:
     """Handles text translation using Lollms."""
@@ -243,9 +243,9 @@ Translation to {lang_name}:"""
             self._unload()
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # TTS SYNTHESIS
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 def _is_svml_error(error_msg: str) -> bool:
     """Detect Intel SVML/CPU instruction errors."""
@@ -273,9 +273,11 @@ class TTSEngine:
     
     def __init__(self, 
                  engine: str = "f5",
-                 speaker_config: Optional[Dict[str, Any]] = None):
+                 speaker_config: Optional[Dict[str, Any]] = None,
+                 target_language: str = "en"):
         self.engine = engine.lower()
         self.speaker_config = speaker_config or {}
+        self.target_language = target_language
         
         # Models
         self.f5_model = None
@@ -489,6 +491,7 @@ class TTSEngine:
             model="tts-1",
             response_format="wav",  # Use WAV for direct loading
             audio_sample_path=sample_path,  # Enable voice cloning if available
+            language=self.target_language,  # Pass target language to LoLLMs
             max_retries=2
         )
         
@@ -517,6 +520,11 @@ class TTSEngine:
             
             if action == 'remove':
                 # Generate silence
+                audio = np.zeros(int(target_duration * 24000))
+                is_silence = True
+            elif not segment.translated_text or not str(segment.translated_text).strip():
+                # Avoid crashing TTS engines (especially XTTS) with empty text
+                logger.warning(f"Segment {segment.idx} has empty translated text, generating silence.")
                 audio = np.zeros(int(target_duration * 24000))
                 is_silence = True
             else:
@@ -608,9 +616,9 @@ class TTSEngine:
                 self._unload_f5()
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # MAIN PHASE 2 ENTRY POINT
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 async def run_phase2(
     task_id: str,
@@ -698,7 +706,7 @@ async def run_phase2(
         output_dir = Path("temp_chunks") / task_id / "synthesized"
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        tts = TTSEngine(tts_engine, speaker_config)
+        tts = TTSEngine(tts_engine, speaker_config, target_language=target_language)
         
         # Process in batches
         total = len(segments)

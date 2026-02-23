@@ -13,7 +13,8 @@ Each phase is self-contained with clear checkpoint boundaries:
 """
 
 from .phase1_diarization import (
-    run_phase1,
+    run_diarization_phase,
+    run_transcription_phase,
     DiarizationResult,
     SpeechSegment,
     extract_audio,

@@ -5,18 +5,18 @@ import * as Transcribe from './views/transcribe.js';
 import * as Analysis from './views/analysis.js';
 import * as Recorder from './views/recorder.js';
 
+// Global state - Initialize immediately to avoid undefined errors in modules
+window.appState = {
+    currentTaskId: null,
+    currentView: null // Start with null so first switch always triggers
+};
+
 const modules = {
     'dashboard': Dashboard,
     'video_dub': VideoDub,
     'transcribe': Transcribe,
     'analysis': Analysis,
     'recorder': Recorder
-};
-
-// Global state
-window.appState = {
-    currentTaskId: null,
-    currentView: 'dashboard'
 };
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -26,7 +26,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Initialize all modules
     Object.entries(modules).forEach(([name, mod]) => {
         try {
-            if (mod.init) {
+            if (mod && mod.init) {
                 mod.init();
                 console.log(`✅ ${name} initialized`);
             }
@@ -38,60 +38,41 @@ document.addEventListener('DOMContentLoaded', () => {
     // Listen for project creation events from the modal
     window.addEventListener('createProject', (e) => {
         const projectType = e.detail.type;
-        console.log(`Creating project of type: ${projectType}`);
         handleProjectCreation(projectType);
     });
 
     // Always start with dashboard on fresh load
-    // User's saved preference is only used for in-app navigation, not initial load
-    setTimeout(() => {
-        doSwitchView('dashboard');
-    }, 100);
+    doSwitchView('dashboard');
 });
 
 function handleProjectCreation(type) {
     const mod = modules[type];
-    if (!mod) {
-        console.error(`Unknown project type: ${type}`);
-        return;
-    }
+    if (!mod) return;
 
-    // Switch to the appropriate view
     doSwitchView(type);
-    
-    // If the module has a new project function, call it
-    if (mod.startNewProject) {
-        mod.startNewProject();
-    }
+    if (mod.startNewProject) mod.startNewProject();
 }
 
 // Main switch view function
 export function doSwitchView(viewName) {
-    console.log(`Switching to view: ${viewName}`);
-    
     // Validate view exists
-    if (!modules[viewName]) {
-        console.error(`Unknown view: ${viewName}`);
-        return;
-    }
+    if (!modules[viewName]) return;
 
-    // Get current and target elements
-    const currentId = window.appState.currentView;
     const target = document.getElementById(`view-${viewName}`);
+    if (!target) return;
+
+    const currentId = window.appState.currentView;
     
-    if (!target) {
-        console.error(`View element not found: view-${viewName}`);
+    // If target is same as current and already visible, do nothing
+    if (currentId === viewName && target.classList.contains('active')) {
         return;
     }
 
-    // Hide current view if exists
-    if (currentId) {
-        const currentEl = document.getElementById(`view-${currentId}`);
-        if (currentEl) {
-            currentEl.style.display = 'none';
-            currentEl.classList.remove('active');
-        }
-    }
+    // Hide all views first to ensure a clean state
+    document.querySelectorAll('.view-section').forEach(el => {
+        el.style.display = 'none';
+        el.classList.remove('active');
+    });
 
     // Show target view
     target.style.display = 'block';
@@ -125,6 +106,55 @@ export function doSwitchView(viewName) {
 export function backToDashboard() {
     doSwitchView('dashboard');
 }
+
+// Global UI Dialog overrides (replacing native alert/confirm)
+window.uiAlert = function(message, title = "Notice") {
+    return new Promise(resolve => {
+        const overlay = document.getElementById('ui-dialog-overlay');
+        if (!overlay) { alert(message); resolve(); return; } // Fallback
+        
+        document.getElementById('ui-dialog-title').innerText = title;
+        document.getElementById('ui-dialog-message').innerText = message;
+        
+        const cancelBtn = document.getElementById('ui-dialog-cancel');
+        const okBtn = document.getElementById('ui-dialog-ok');
+        
+        cancelBtn.style.display = 'none';
+        
+        okBtn.onclick = () => {
+            overlay.style.display = 'none';
+            resolve();
+        };
+        
+        overlay.style.display = 'flex';
+    });
+};
+
+window.uiConfirm = function(message, title = "Confirm Action") {
+    return new Promise(resolve => {
+        const overlay = document.getElementById('ui-dialog-overlay');
+        if (!overlay) { resolve(confirm(message)); return; } // Fallback
+        
+        document.getElementById('ui-dialog-title').innerText = title;
+        document.getElementById('ui-dialog-message').innerText = message;
+        
+        const cancelBtn = document.getElementById('ui-dialog-cancel');
+        const okBtn = document.getElementById('ui-dialog-ok');
+        
+        cancelBtn.style.display = 'block';
+        
+        cancelBtn.onclick = () => {
+            overlay.style.display = 'none';
+            resolve(false);
+        };
+        okBtn.onclick = () => {
+            overlay.style.display = 'none';
+            resolve(true);
+        };
+        
+        overlay.style.display = 'flex';
+    });
+};
 
 // Bind to window for inline handlers
 window.doSwitchView = doSwitchView;

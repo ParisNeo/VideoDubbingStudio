@@ -8,8 +8,8 @@
     <!-- Fonts -->
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
     
-    <!-- Icons (LOCAL FILE) -->
-    <link rel="stylesheet" href="/static/css/all.min.css">
+    <!-- Icons (CDN) - Fixes missing SVGs -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" integrity="sha512-DTOQO9RWCH3ppGqcWaEA1BIZOC6xxalwEsw9c2QQeAIftl+Vegovlnee1c9QX4TctnWMn13TZye+giMm8e2LwA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
     
     <!-- Custom CSS -->
     <link rel="stylesheet" href="/static/css/style.css">
@@ -33,6 +33,18 @@
         {% include 'views/analysis.html' %}
         {% include 'views/recorder.html' %}
     </main>
+</div>
+
+<!-- Global UI Dialogs -->
+<div id="ui-dialog-overlay" class="modal-overlay" style="display: none; z-index: 9999; align-items: center; justify-content: center;">
+    <div class="modal-content" style="max-width: 420px; padding: 24px; text-align: center; border-radius: 12px; background: var(--bg-panel); border: 1px solid var(--border); box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+        <h3 id="ui-dialog-title" style="margin-bottom: 16px; font-size: 1.25rem; color: var(--text-main);">Title</h3>
+        <p id="ui-dialog-message" style="color: var(--text-muted); margin-bottom: 24px; white-space: pre-wrap; word-wrap: break-word; font-size: 0.95rem; line-height: 1.5;"></p>
+        <div style="display: flex; justify-content: center; gap: 12px;">
+            <button id="ui-dialog-cancel" class="btn-secondary" style="display: none; min-width: 100px;">Cancel</button>
+            <button id="ui-dialog-ok" class="btn-primary" style="min-width: 100px;">OK</button>
+        </div>
+    </div>
 </div>
 
 <!-- Load Main Module -->

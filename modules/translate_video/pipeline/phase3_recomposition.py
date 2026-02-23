@@ -33,9 +33,9 @@ from core.database import db
 logger = logging.getLogger("phase3_recomposition")
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # DATA MODELS
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 @dataclass
 class AudioSegment:
@@ -46,9 +46,9 @@ class AudioSegment:
     speaker_id: int
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # AUDIO PROCESSING
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 def apply_crossfade(audio: np.ndarray, 
                     fade_samples: int = 480,
@@ -68,93 +68,6 @@ def apply_crossfade(audio: np.ndarray,
     result[-fade_samples:] *= fade_out
     
     return result
-
-
-def time_stretch_simple(audio: np.ndarray, 
-                        target_duration: float,
-                        current_sample_rate: int = 24000,
-                        max_stretch_ratio: float = 2.0) -> np.ndarray:
-    """
-    Time-stretch audio to match target duration using simple resampling.
-    
-    Uses linear interpolation with reasonable limits to prevent over-stretching.
-    """
-    current_duration = len(audio) / current_sample_rate
-    
-    # Skip if already close enough
-    if abs(current_duration - target_duration) < 0.05:
-        return audio
-    
-    # Calculate stretch ratio
-    if current_duration == 0:
-        return audio
-    
-    stretch_ratio = target_duration / current_duration
-    
-    # Limit extreme stretching - prefer natural speed with padding over distortion
-    if stretch_ratio > max_stretch_ratio:
-        # Audio is too short - stretch moderately and pad with silence
-        limited_ratio = max_stretch_ratio
-        limited_duration = current_duration * limited_ratio
-        target_length = int(limited_duration * current_sample_rate)
-        
-        # Stretch to limited ratio
-        indices = np.linspace(0, len(audio) - 1, target_length)
-        indices_floor = np.floor(indices).astype(np.int64)
-        indices_ceil = np.minimum(indices_floor + 1, len(audio) - 1)
-        fractions = indices - indices_floor
-        stretched = audio[indices_floor] * (1 - fractions) + audio[indices_ceil] * fractions
-        
-        # Pad with silence to reach target duration
-        final_length = int(target_duration * current_sample_rate)
-        if final_length > len(stretched):
-            silence = np.zeros(final_length - len(stretched), dtype=np.float32)
-            stretched = np.concatenate([stretched, silence])
-        
-        return stretched.astype(np.float32)
-        
-    elif stretch_ratio < 1.0 / max_stretch_ratio:
-        # Audio is too long - compress moderately and truncate if needed
-        limited_ratio = 1.0 / max_stretch_ratio
-        limited_duration = current_duration * limited_ratio
-        target_length = int(limited_duration * current_sample_rate)
-        
-        # Compress to limited ratio
-        indices = np.linspace(0, len(audio) - 1, target_length)
-        indices_floor = np.floor(indices).astype(np.int64)
-        indices_ceil = np.minimum(indices_floor + 1, len(audio) - 1)
-        fractions = indices - indices_floor
-        stretched = audio[indices_floor] * (1 - fractions) + audio[indices_ceil] * fractions
-        
-        # If still too long, fade out at the end instead of abrupt cut
-        final_length = int(target_duration * current_sample_rate)
-        if len(stretched) > final_length:
-            # Truncate with fade out
-            stretched = stretched[:final_length]
-            # Apply fade out to last 100ms
-            fade_samples = min(int(0.1 * current_sample_rate), final_length // 4)
-            if fade_samples > 10:
-                fade_out = np.linspace(1, 0, fade_samples)
-                stretched[-fade_samples:] *= fade_out
-        
-        return stretched.astype(np.float32)
-    
-    # Normal stretching within acceptable limits
-    target_length = int(target_duration * current_sample_rate)
-    
-    if target_length <= 0:
-        return audio
-    
-    # Simple linear interpolation (no SVML dependencies)
-    indices = np.linspace(0, len(audio) - 1, target_length)
-    indices_floor = np.floor(indices).astype(np.int64)
-    indices_ceil = np.minimum(indices_floor + 1, len(audio) - 1)
-    fractions = indices - indices_floor
-    
-    # Linear interpolation
-    stretched = audio[indices_floor] * (1 - fractions) + audio[indices_ceil] * fractions
-    
-    return stretched.astype(np.float32)
 
 
 def build_speech_track(
@@ -202,21 +115,20 @@ def build_speech_track(
                     seg_audio = seg_audio[indices_floor] * (1 - fractions) + seg_audio[indices_ceil] * fractions
                     seg_audio = seg_audio.astype(np.float32)
             
-            # Time-stretch to match original duration using simple method
-            target_duration = seg.end - seg.start
-            seg_audio = time_stretch_simple(seg_audio, target_duration, target_sample_rate)
-            
-            # Place in track
+            # Place in track without pitch-shifting stretch
             start_sample = int(seg.start * target_sample_rate)
-            end_sample = min(start_sample + len(seg_audio), len(track))
-            actual_len = end_sample - start_sample
+            
+            # Ensure track is long enough to hold this audio
+            track_end_needed = start_sample + len(seg_audio)
+            if track_end_needed > len(track):
+                track = np.pad(track, (0, track_end_needed - len(track)))
             
             # Apply crossfade and add to track
-            seg_audio = apply_crossfade(seg_audio[:actual_len], 
+            seg_audio = apply_crossfade(seg_audio, 
                                         fade_samples=target_sample_rate // 100,  # 10ms
                                         sample_rate=target_sample_rate)
             
-            track[start_sample:end_sample] += seg_audio
+            track[start_sample:track_end_needed] += seg_audio
             
             if progress_callback:
                 progress_callback(i + 1, len(segments))
@@ -492,9 +404,9 @@ def get_video_duration(video_path: str) -> float:
     return float(result.stdout.strip())
 
 
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 # MAIN PHASE 3 ENTRY POINT
-# =============================================================================
+# -------------------------------------------------------------------------------------------------------------------------------
 
 async def run_phase3(
     task_id: str,
@@ -518,9 +430,12 @@ async def run_phase3(
         RuntimeError: If assembly fails
     """
     
-    async def report(phase: str, percent: int, message: str):
+    import functools
+    loop = asyncio.get_running_loop()
+    
+    def threadsafe_report(phase: str, percent: int, message: str):
         if progress_callback:
-            await progress_callback(phase, percent, message)
+            asyncio.run_coroutine_threadsafe(progress_callback(phase, percent, message), loop)
         logger.info(f"[Phase 3] {percent}%: {message}")
     
     try:
@@ -560,7 +475,7 @@ async def run_phase3(
         if len(segments_with_errors) == len(seg_data):
             logger.warning("All segments are silent (TTS failed for all). Video will have no dubbed audio.")
         
-        await report("loading", 82, f"Loaded {len(segments)} audio segments")
+        threadsafe_report("loading", 82, f"Loaded {len(segments)} audio segments")
         
         # Setup output paths
         output_dir = Path("outputs") / task_id
@@ -572,25 +487,27 @@ async def run_phase3(
         # Step 1: Optional background separation
         background_path = None
         if use_demucs and master_audio:
-            await report("separating", 85, "Separating background audio...")
+            threadsafe_report("separating", 85, "Separating background audio...")
             bg_dir = Path("temp_chunks") / task_id / "demucs"
             bg_dir.mkdir(parents=True, exist_ok=True)
-            background_path = separate_background_demucs(master_audio, bg_dir)
+            background_path = await loop.run_in_executor(
+                None, functools.partial(separate_background_demucs, master_audio, bg_dir)
+            )
         
         # Step 2: Build speech track
-        await report("assembling", 88, "Building speech track...")
+        threadsafe_report("assembling", 88, "Building speech track...")
         
         speech_track_path = output_dir / "speech_track.wav"
         
         def speech_progress(current, total):
             pct = 88 + int((current / total) * 4)
-            asyncio.create_task(report("assembling", pct, 
-                f"Placed {current}/{total} segments"))
+            threadsafe_report("assembling", pct, f"Placed {current}/{total} segments")
         
-        build_speech_track(segments, speech_track_path, 
-                          progress_callback=speech_progress)
+        await loop.run_in_executor(
+            None, functools.partial(build_speech_track, segments, speech_track_path, target_sample_rate=48000, progress_callback=speech_progress)
+        )
         
-        await report("assembling", 92, "Speech track built")
+        threadsafe_report("assembling", 92, "Speech track built")
         
         # CHECKPOINT: Save after speech track
         db.update_task(
@@ -602,18 +519,24 @@ async def run_phase3(
         )
         
         # Step 3: Mix audio
-        await report("mixing", 94, "Mixing speech with background...")
+        threadsafe_report("mixing", 94, "Mixing speech with background...")
         
         final_audio_path = output_dir / "final_audio.wav"
         
-        mix_audio_tracks(
-            str(speech_track_path),
-            background_path,
-            final_audio_path,
-            progress_callback=lambda msg: asyncio.create_task(report("mixing", 96, msg))
+        await loop.run_in_executor(
+            None, functools.partial(
+                mix_audio_tracks,
+                str(speech_track_path),
+                background_path,
+                final_audio_path,
+                target_duration=None,
+                speech_gain_db=-6,
+                background_gain_db=-20,
+                progress_callback=lambda msg: threadsafe_report("mixing", 96, msg)
+            )
         )
         
-        await report("mixing", 96, "Audio mixing complete")
+        threadsafe_report("mixing", 96, "Audio mixing complete")
         
         # CHECKPOINT: Save after audio mix
         db.update_task(
@@ -623,15 +546,18 @@ async def run_phase3(
         )
         
         # Step 4: Merge with video
-        await report("rendering", 98, "Rendering final video...")
+        threadsafe_report("rendering", 98, "Rendering final video...")
         
         final_video_path = output_dir / "dubbed_video.mp4"
         
-        merge_with_video(
-            original_video_path,
-            str(final_audio_path),
-            final_video_path,
-            progress_callback=lambda msg: asyncio.create_task(report("rendering", 99, msg))
+        await loop.run_in_executor(
+            None, functools.partial(
+                merge_with_video,
+                original_video_path,
+                str(final_audio_path),
+                final_video_path,
+                progress_callback=lambda msg: threadsafe_report("rendering", 99, msg)
+            )
         )
         
         # Final checkpoint
@@ -644,7 +570,7 @@ async def run_phase3(
             message="Dubbing complete!"
         )
         
-        await report("complete", 100, "Video dubbing complete!")
+        threadsafe_report("complete", 100, "Video dubbing complete!")
         
         return str(final_video_path)
         

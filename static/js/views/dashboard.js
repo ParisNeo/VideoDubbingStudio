@@ -98,8 +98,9 @@ function renderTasks(tasks, container) {
         const typeIcon = getProjectTypeIcon(task);
         
         // Simplified action logic
-        const canMonitor = ['processing', 'queued', 'awaiting_validation'].includes(task.status);
-        const canResume = ['paused', 'failed', 'error'].includes(task.status) || task.was_running_at_shutdown;
+        const isAwaitingValidation = ['awaiting_validation', 'awaiting_translation_review'].includes(task.status) || ['awaiting_validation', 'awaiting_translation_review'].includes(task.phase);
+        const canMonitor = ['processing', 'queued', 'running_translation'].includes(task.status) || isAwaitingValidation;
+        const canResume = (['paused', 'failed', 'error'].includes(task.status) || task.was_running_at_shutdown) && !isAwaitingValidation;
         
         // Build action buttons HTML
         let actionButtons = '';
@@ -140,19 +141,23 @@ function renderTasks(tasks, container) {
         return `
             <div class="task-card" data-task-id="${task.task_id}" data-status="${task.status}">
                 <div class="task-header">
-                    <div class="task-title">
-                        <div class="task-type-row">
+                    <div style="display: flex; gap: 15px; align-items: center; width: 100%;">
+                        <div style="width: 60px; height: 45px; background: var(--bg-hover); border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; flex-shrink: 0; border: 1px solid var(--border);">
                             ${typeIcon}
-                            <span class="filename" title="${task.filename || 'Untitled'}">${truncate(task.filename || 'Untitled', 35)}</span>
                         </div>
-                        <span class="task-meta">
-                            <span class="task-date"><i class="far fa-calendar"></i> ${date}</span>
-                            ${task.src_lang && task.tgt_lang ? `<span class="task-langs"><i class="fas fa-language"></i> ${task.src_lang === 'auto' ? 'Auto' : task.src_lang} → ${task.tgt_lang}</span>` : ''}
-                        </span>
-                    </div>
-                    <div class="task-badges">
-                        ${interruptedWarning}
-                        <span class="status-badge ${statusClass}">${formatStatus(task.status)}</span>
+                        <div class="task-title" style="flex: 1; min-width: 0;">
+                            <div style="display: flex; justify-content: space-between; align-items: flex-start; width: 100%;">
+                                <span class="filename" title="${task.filename || 'Untitled'}" style="font-size: 1.05rem; margin-bottom: 4px;">${truncate(task.filename || 'Untitled', 35)}</span>
+                                <div class="task-badges">
+                                    ${interruptedWarning}
+                                    <span class="status-badge ${statusClass}">${formatStatus(task.status)}</span>
+                                </div>
+                            </div>
+                            <span class="task-meta">
+                                <span class="task-date"><i class="far fa-calendar"></i> ${date}</span>
+                                ${task.src_lang && task.tgt_lang ? `<span class="task-langs"><i class="fas fa-language"></i> ${task.src_lang === 'auto' ? 'Auto' : task.src_lang} → ${task.tgt_lang}</span>` : ''}
+                            </span>
+                        </div>
                     </div>
                 </div>
                 
@@ -184,13 +189,13 @@ function renderTasks(tasks, container) {
 function getProjectTypeIcon(task) {
     // Determine icon based on task characteristics
     if (task.source === 'youtube') {
-        return '<span class="type-icon youtube"><i class="fab fa-youtube"></i></span>';
+        return '<i class="fab fa-youtube" style="color: #ff4444;"></i>';
     } else if (task.separate_audio) {
-        return '<span class="type-icon audio"><i class="fas fa-music"></i></span>';
+        return '<i class="fas fa-music" style="color: #a78bfa;"></i>';
     } else if (task.tts_engine === 'f5' || task.tts_engine === 'fishspeech') {
-        return '<span class="type-icon dub"><i class="fas fa-microphone-alt"></i></span>';
+        return '<i class="fas fa-microphone-alt" style="color: #34d399;"></i>';
     }
-    return '<span class="type-icon default"><i class="fas fa-file-video"></i></span>';
+    return '<i class="fas fa-file-video" style="color: var(--accent);"></i>';
 }
 
 function getStatusClass(status) {
@@ -249,41 +254,44 @@ function openTask(taskId) {
 
 async function resumeTask(taskId) {
     console.log(`Resuming task: ${taskId}`);
-    if (!confirm('Resume this task from where it left off?')) return;
+    const confirmed = await window.uiConfirm('Resume this task from where it left off?', 'Resume Task');
+    if (!confirmed) return;
     
     try {
         const response = await postJSON(`/api/projects/${taskId}/resume`, {});
-        alert(`Task is resuming: ${response.message || 'Please wait...'}`);
+        await window.uiAlert(`Task is resuming: ${response.message || 'Please wait...'}`, 'Success');
         openTask(taskId);
     } catch (err) {
-        alert('Failed to resume task: ' + err.message);
+        await window.uiAlert('Failed to resume task: ' + err.message, 'Error');
     }
 }
 
 async function restartTask(taskId, fromPhase = null) {
     const message = fromPhase 
-        ? `Restart this task from ${fromPhase} phase?`
+        ? `Restart this task from the ${fromPhase} phase?`
         : `Restart this task from the beginning?`;
     
-    if (!confirm(message)) return;
+    const confirmed = await window.uiConfirm(message, 'Restart Task');
+    if (!confirmed) return;
     
     const payload = fromPhase ? { from_phase: fromPhase } : {};
     
     try {
         const response = await postJSON(`/api/projects/${taskId}/restart`, payload);
-        alert(`Task restarted: ${response.message || 'Please wait...'}`);
+        await window.uiAlert(`Task restarted: ${response.message || 'Please wait...'}`, 'Success');
         openTask(taskId);
     } catch (err) {
-        alert('Failed to restart task: ' + err.message);
+        await window.uiAlert('Failed to restart task: ' + err.message, 'Error');
     }
 }
 
-function deleteTask(taskId, event) {
+async function deleteTask(taskId, event) {
     if (event) event.stopPropagation();
     
-    const confirmMsg = `🗑️ Delete Project\n\nThis will permanently delete this project and all associated files.\n\nIf the task is currently running, it will be force-stopped.\n\nThis action cannot be undone.`;
+    const confirmMsg = `This will permanently delete this project and all associated files.\n\nIf the task is currently running, it will be force-stopped.\n\nThis action cannot be undone.`;
     
-    if (!confirm(confirmMsg)) return;
+    const confirmed = await window.uiConfirm(confirmMsg, '🗑️ Delete Project');
+    if (!confirmed) return;
     
     console.log(`Force deleting task: ${taskId}`);
     performDelete(taskId);
@@ -321,6 +329,6 @@ async function performDelete(taskId) {
             card.style.opacity = '1';
             card.style.pointerEvents = 'auto';
         }
-        alert('Delete failed: ' + err.message);
+        await window.uiAlert('Delete failed: ' + err.message, 'Error');
     }
 }

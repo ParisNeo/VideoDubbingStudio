@@ -1,7 +1,12 @@
 <div id="view-video_dub" class="view-section" style="display: none;">
-    <header class="view-header">
-        <h1><i class="fas fa-video"></i> Video Dubbing Studio</h1>
-        <p class="subtitle">Create new dubbing projects or monitor active tasks</p>
+    <header class="view-header" style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <h1><i class="fas fa-video"></i> Video Dubbing Studio</h1>
+            <p class="subtitle">Create new dubbing projects or monitor active tasks</p>
+        </div>
+        <button onclick="backToDashboard()" class="btn-secondary" style="height: fit-content;">
+            <i class="fas fa-arrow-left"></i> Back to Dashboard
+        </button>
     </header>
 
     <div id="dubbing-wizard" class="wizard-container">
@@ -98,37 +103,36 @@
             </div>
         </div>
 
-        <!-- STATE 2: MONITORING (Granular Task Chain) -->
+        <!-- SHARED TIMELINE HEADER -->
+        <div id="task-timeline-header" class="hidden" style="margin-bottom: 20px;">
+            <div class="status-card" style="margin-bottom: 20px;">
+                <div class="status-header">
+                    <h3><i class="fas fa-tasks"></i> Workflow Progress</h3>
+                    <span id="processing-percent" class="percent-badge">0%</span>
+                </div>
+                <div class="progress-track">
+                    <div id="main-progress-bar" class="progress-fill" style="width: 0%"></div>
+                </div>
+                <div id="processing-status-text" class="status-detail">Initializing...</div>
+            </div>
+
+            <div class="task-list-card card" style="width: 100%; margin-bottom: 20px; max-height: 350px; overflow-y: auto;">
+                <h4 style="margin-bottom:15px;"><i class="fas fa-link"></i> Execution Chain</h4>
+                <!-- Container for the visual chain -->
+                <div id="granular-task-list" class="task-chain-container">
+                    <div class="empty-state">Waiting for workflow...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- STATE 2: MONITORING (Console Logs Only) -->
         <div id="state-processing" class="wizard-step hidden">
             <div class="monitor-panel">
-                <div class="status-card">
-                    <div class="status-header">
-                        <h3><i class="fas fa-tasks"></i> Workflow Progress</h3>
-                        <span id="processing-percent" class="percent-badge">0%</span>
+                <div class="terminal-window" style="width: 100%;">
+                    <div class="term-header">
+                        <i class="fas fa-terminal"></i> Live Logs
                     </div>
-                    <div class="progress-track">
-                        <div id="main-progress-bar" class="progress-fill" style="width: 0%"></div>
-                    </div>
-                    <div id="processing-status-text" class="status-detail">Initializing...</div>
-                </div>
-
-                <div class="stacked-view" style="margin-top: 20px; display: flex; flex-direction: column; gap: 20px;">
-                    <!-- Top: Task Chain (Full Width) -->
-                    <div class="task-list-card card" style="width: 100%;">
-                        <h4 style="margin-bottom:15px;"><i class="fas fa-link"></i> Execution Chain</h4>
-                        <!-- Container for the visual chain -->
-                        <div id="granular-task-list" class="task-chain-container">
-                            <div class="empty-state">Waiting for workflow...</div>
-                        </div>
-                    </div>
-                    
-                    <!-- Bottom: Console Logs (Full Width) -->
-                    <div class="terminal-window" style="width: 100%;">
-                        <div class="term-header">
-                            <i class="fas fa-terminal"></i> Live Logs
-                        </div>
-                        <div id="processing-term" class="log-content large-term" style="height: 400px;"></div>
-                    </div>
+                    <div id="processing-term" class="log-content large-term" style="height: 400px;"></div>
                 </div>
             </div>
         </div>
@@ -138,10 +142,8 @@
             <div class="card">
                 <div class="header-row" style="margin-bottom:20px;">
                     <h3><i class="fas fa-user-check"></i> Validate Speakers</h3>
-                    <div class="header-actions">
-                        <button id="start-dub-btn" class="btn-success">
-                            <i class="fas fa-check"></i> Confirm & Dub
-                        </button>
+                    <div class="header-actions" id="validation-actions-container">
+                        <!-- Actions injected by JS -->
                     </div>
                 </div>
                 

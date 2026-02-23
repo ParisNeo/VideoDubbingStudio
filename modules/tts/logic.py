@@ -254,7 +254,12 @@ def generate_speech_lollms(
     import subprocess
     import base64
     import time
-    
+
+    # CRITICAL FIX: Prevent XTTS from crashing on empty text
+    if not text or not str(text).strip():
+        print("[LoLLMs TTS] Empty text provided, returning silence.")
+        return np.zeros(24000, dtype=np.float32), 24000
+
     # Get LoLLMs configuration - ONLY use native LoLLMs endpoint
     base_url = api_url or os.getenv("LOLLMS_URL", "http://localhost:9642")
     key = api_key or os.getenv("LOLLMS_API_KEY", "")
@@ -272,6 +277,7 @@ def generate_speech_lollms(
     # Priority: audio_sample (base64) > voice > default
     payload = {
             "input": text,
+            "text": text,  # Fallback: Coqui XTTS backend sometimes strictly expects 'text' instead of 'input'
             "response_format": response_format,
             "speed": 1.0,
             "language": language

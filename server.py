@@ -26,6 +26,30 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 os.environ["MKL_ENABLE_INSTRUCTIONS"] = "SSE4_2"  # Disable AVX/AVX2/SVML
 os.environ["NPY_DISABLE_CPU_FEATURES"] = "AVX512F,AVX2,AVX"  # Disable NumPy AVX too
 
+# CRITICAL FIX: Silence harmless Windows asyncio ProactorEventLoop WinError 10054
+if sys.platform == 'win32':
+    import asyncio
+    from functools import wraps
+    from asyncio.proactor_events import _ProactorBasePipeTransport
+
+    def silence_winerror_10054(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except ConnectionResetError as e:
+                if e.winerror == 10054:
+                    pass
+                else:
+                    raise
+        return wrapper
+
+    # Use getattr to safely access and monkey-patch the method
+    original_method = getattr(_ProactorBasePipeTransport, '_call_connection_lost', None)
+    if original_method and callable(original_method):
+        setattr(_ProactorBasePipeTransport, '_call_connection_lost', 
+                silence_winerror_10054(original_method))
+
 # Disable Intel SVML optimizations that cause crashes on some Windows systems
 try:
     # This must be set before torch is imported

@@ -208,9 +208,27 @@ async function handleYouTube(e) {
 async function reprocessTask(taskId) {
     const res = await fetch(`/api/tasks/${taskId}`);
     if (!res.ok) return alert('Task not found');
+    const task = await res.json();
+    
+    const confirmed = confirm(`Reprocess "${task.input_filename || 'this task'}"? This will restart the workflow from the beginning.`);
+    if (!confirmed) return;
 
-    // For brevity, we just call the server endpoint directly via fetch
-    // (Implementation omitted – similar to handleUpload)
+    try {
+        const restartRes = await fetch(`/api/tasks/${taskId}/control`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ action: 'restart' })
+        });
+        
+        if (restartRes.ok) {
+            showProcessMonitor(taskId);
+        } else {
+            const err = await restartRes.json();
+            throw new Error(err.detail || "Server rejected restart");
+        }
+    } catch (e) {
+        alert("Restart failed: " + e.message);
+    }
 }
 
 // -------------------------------------------------

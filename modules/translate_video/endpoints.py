@@ -262,15 +262,9 @@ async def resume_task(task_id: str):
         if not task:
             raise HTTPException(404, "Project not found")
         
-        allowed_statuses = ['paused', 'failed', 'error', 'resuming']
-        if task.get('status') not in allowed_statuses:
-            if task.get('status') == 'processing':
-                if task_id not in task_manager.active_tasks:
-                    pass
-                else:
-                    raise HTTPException(400, f"Task is already running")
-            else:
-                raise HTTPException(400, f"Cannot resume task with status '{task.get('status')}'")
+        # The only strict rule for resuming is that the task MUST NOT currently be running.
+        if task_id in task_manager.active_tasks:
+            raise HTTPException(400, "Task is already actively running")
         
         await task_manager.resume_task(task_id)
         return {
@@ -414,102 +408,87 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
 
 async def handle_speaker_validation(task_id: str, config: Dict[str, Any]):
     """
-    Handle speaker validation and transcription review.
-    
-    This is the FIRST validation step - users review transcriptions and confirm
-    before translation begins.
+    Step 1: Speakers validated -> Start Transcription.
     """
     try:
-        # Validate speaker actions
-        valid_actions = {'translate', 'remove', 'dub'}
-        for spk_id, info in config.items():
-            if isinstance(info, dict) and info.get('action') not in valid_actions:
-                raise HTTPException(400, f"Invalid action for speaker {spk_id}")
-        
-        # Extract edited transcriptions if provided
-        edited_segments = config.get('edited_segments')  # User may have edited transcriptions
-        proceed_to_translation = config.get('proceed_to_translation', True)
-        
-        # Merge with existing speaker_config to preserve sample_path
+        # Merge speaker config
         existing_task = db.get_task(task_id)
         existing_config = existing_task.get('speaker_config', {}) if existing_task else {}
         
-        # Merge configs
         merged_config = {}
-        for spk_id_str, new_info in config.items():
-            if spk_id_str == 'edited_segments' or spk_id_str.startswith('_'):
-                continue  # Skip metadata fields
-            existing_info = existing_config.get(spk_id_str, {})
-            merged_info = dict(existing_info)
-            if isinstance(new_info, dict):
-                merged_info.update(new_info)
-            merged_config[spk_id_str] = merged_info
-        
-        # Preserve language settings
-        tgt_lang = 'en'
-        src_lang = 'auto'
-        tts_engine = 'f5'
-        separate_audio = False
-        
-        if existing_task:
-            tgt_lang = existing_task.get('tgt_lang') or existing_task.get('target_language') or 'en'
-            src_lang = existing_task.get('src_lang') or 'auto'
-            tts_engine = existing_task.get('tts_engine') or 'f5'
-            separate_audio = existing_task.get('separate_audio', False)
+        for spk_id, new_info in config.items():
+            if spk_id.startswith('_'): continue
+            merged = dict(existing_config.get(spk_id, {}))
+            merged.update(new_info)
+            merged_config[spk_id] = merged
             
-            if not tgt_lang or str(tgt_lang).strip() == "":
-                tgt_lang = 'en'
-            if not src_lang or str(src_lang).strip() == "":
-                src_lang = 'auto'
+        # Update and move to TRANSCRIPTION
+        db.update_task(task_id, 
+            speaker_config=merged_config,
+            phase='transcribing', 
+            status='queued',
+            message='Speakers confirmed - starting transcription...'
+        )
         
-        print(f"Transcription validation: src={src_lang}, tgt={tgt_lang}, edited={edited_segments is not None}")
+        asyncio.create_task(task_manager.start_task(task_id))
         
-        # Update task - move to running_translation phase to actually run translation
-        update_data = {
-            'speaker_config': merged_config,
-            'phase': 'running_translation',  # This will trigger the translation phase
-            'status': 'queued',
-            'was_running_at_shutdown': 0,
-            'message': 'Transcription validated - starting translation...',
-            'tgt_lang': tgt_lang,
-            'src_lang': src_lang,
-            'tts_engine': tts_engine,
-            'separate_audio': separate_audio
-        }
-        
-        # Store edited transcriptions if provided
-        if edited_segments:
-            update_data['edited_transcriptions'] = edited_segments
-        
-        db.update_task(task_id, **update_data)
-        
-        # Send confirmation
-        confirmation_data = {
-            'type': 'transcription_validated',
-            'data': {
-                'task_id': task_id,
-                'status': 'queued',
-                'phase': 'running_translation',
-                'progress': 36,
-                'message': 'Starting translation for review...',
-                'speaker_config': merged_config,
-                'tgt_lang': tgt_lang,
-                'src_lang': src_lang
-            }
-        }
-        
-        await broadcast_to_task(task_id, confirmation_data)
-        
-        # Auto-start translation phase
-        if proceed_to_translation:
-            asyncio.create_task(task_manager.start_task(task_id))
-            
-    except HTTPException:
-        raise
     except Exception as e:
-        tb_str = traceback.format_exc()
-        print(f"Transcription validation failed with traceback:\n{tb_str}")
-        raise HTTPException(500, f"Failed to process validation: {str(e)}\n\nFull traceback in server logs")
+        traceback.print_exc()
+        raise HTTPException(500, f"Speaker validation failed: {str(e)}")
+
+async def handle_transcription_validation(task_id: str, segments: List[Dict]):
+    """
+    Step 2: Transcription validated -> Start Translation.
+    """
+    try:
+        db.update_task(task_id, 
+            segments=segments,
+            phase='translating', 
+            status='queued',
+            message='Transcription confirmed - starting translation...'
+        )
+        asyncio.create_task(task_manager.start_task(task_id))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, f"Transcription validation failed: {str(e)}")
+
+async def handle_translation_validation(task_id: str, segments: List[Dict]):
+    """
+    Step 3: Translation validated -> Start TTS.
+    """
+    try:
+        # Handle wrapped format if necessary
+        if isinstance(segments, dict) and 'edited_segments' in segments:
+            segments = segments['edited_segments']
+            
+        # Update segments if they are full objects, or merge edits
+        # Ideally frontend sends full updated segment list
+        
+        db.update_task(task_id, 
+            segments=segments,
+            phase='synthesizing', 
+            status='queued',
+            message='Translation confirmed - starting voice synthesis...'
+        )
+        asyncio.create_task(task_manager.start_task(task_id))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, f"Translation validation failed: {str(e)}")
+
+async def handle_audio_validation(task_id: str):
+    """
+    Step 4: Audio validated -> Start Final Assembly.
+    """
+    try:
+        db.update_task(task_id, 
+            phase='recomposing', 
+            status='queued',
+            message='Audio confirmed - starting final assembly...'
+        )
+        asyncio.create_task(task_manager.start_task(task_id))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, f"Audio validation failed: {str(e)}")
 
 
 async def handle_translation_validation(task_id: str, config: Dict[str, Any]):
@@ -780,49 +759,37 @@ async def get_speaker_sample(task_id: str, speaker_id: int):
         print(f"Get speaker sample failed with traceback:\n{tb_str}")
         raise HTTPException(500, f"Failed to get speaker sample: {str(e)}\n\nFull traceback in server logs")
 
-@router.post("/api/projects/{task_id}/validate")
+@router.post("/api/projects/{task_id}/validate-speakers")
 async def validate_speakers_api(task_id: str, update: SpeakerConfigUpdate):
-    """
-    First validation step: Review transcriptions and speaker config.
-    Triggers translation review phase.
-    """
-    try:
-        await handle_speaker_validation(task_id, update.speakers)
-        return {"status": "accepted", "phase": "awaiting_translation_review"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        tb_str = traceback.format_exc()
-        print(f"Validate speakers API failed with traceback:\n{tb_str}")
-        raise HTTPException(500, f"Failed to validate speakers: {str(e)}\n\nFull traceback in server logs")
+    """Step 1: Validate speakers, trigger transcription."""
+    task = db.get_task(task_id)
+    if not task:
+        raise HTTPException(404, f"Project {task_id} not found in database")
+        
+    await handle_speaker_validation(task_id, update.speakers)
+    return {"status": "accepted", "next_phase": "transcribing"}
 
+@router.post("/api/projects/{task_id}/validate-transcription")
+async def validate_transcription_api(task_id: str, request: Request):
+    """Step 2: Validate text, trigger translation."""
+    body = await request.json()
+    segments = body.get('segments', [])
+    await handle_transcription_validation(task_id, segments)
+    return {"status": "accepted", "next_phase": "translating"}
 
 @router.post("/api/projects/{task_id}/validate-translation")
 async def validate_translation_api(task_id: str, request: Request):
-    """
-    Second validation step: Review translations.
-    Triggers TTS synthesis phase.
-    """
-    try:
-        # Parse raw JSON to handle flexible structure
-        body = await request.json()
-        
-        # Extract data - handle both wrapped and unwrapped formats
-        # Frontend may send: {edited_segments: [...], proceed_to_tts: true}
-        # Or: {speakers: {edited_segments: [...], proceed_to_tts: true}}
-        speakers_data = body.get('speakers', {})
-        if not speakers_data:
-            # Frontend sends flat structure, use body directly
-            speakers_data = body
-        
-        await handle_translation_validation(task_id, speakers_data)
-        return {"status": "accepted", "phase": "translating"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        tb_str = traceback.format_exc()
-        print(f"Validate translation API failed with traceback:\n{tb_str}")
-        raise HTTPException(500, f"Failed to validate translation: {str(e)}\n\nFull traceback in server logs")
+    """Step 3: Validate translation, trigger TTS."""
+    body = await request.json()
+    segments = body.get('segments', [])
+    await handle_translation_validation(task_id, segments)
+    return {"status": "accepted", "next_phase": "synthesizing"}
+
+@router.post("/api/projects/{task_id}/validate-audio")
+async def validate_audio_api(task_id: str):
+    """Step 4: Validate audio, trigger assembly."""
+    await handle_audio_validation(task_id)
+    return {"status": "accepted", "next_phase": "recomposing"}
     
     
 @router.get("/api/projects/{task_id}/download")

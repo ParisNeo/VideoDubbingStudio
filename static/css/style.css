@@ -61,21 +61,28 @@ body {
 
 #content {
     flex: 1;
-    overflow-y: auto; /* Enable vertical scrolling */
+    overflow-y: auto;
     overflow-x: hidden;
     padding: 32px 40px;
     min-width: 0;
-    height: 100vh;
+    height: auto; /* Allow natural height */
+    min-height: 100vh;
 }
 
 /* VIEW MANAGEMENT */
 .view-section { 
     display: none;
     animation: fadeIn 0.25s ease-out;
-    min-height: 100%; /* Ensure content can scroll */
+    min-height: 100%;
+    width: 100%;
 }
 
 .view-section.active {
+    display: block !important;
+}
+
+/* Ensure dashboard is visible if JS fails or is slow */
+#view-dashboard:not(.view-section) {
     display: block;
 }
 
@@ -518,8 +525,8 @@ header h1 i {
 /* WIZARD STEPS */
 .wizard-container {
     max-width: 1200px;
-    overflow-y: auto;
-    max-height: calc(100vh - 150px);
+    overflow-y: visible; /* Let parent content scroll handle it */
+    min-height: 400px;
 }
 
 .wizard-step {
@@ -675,11 +682,21 @@ header h1 i {
     gap: 16px; 
 }
 
+.review-list-container {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    width: 100%;
+}
+
 /* TRANSCRIPTION & TRANSLATION REVIEW UI - ENHANCED FOR 100% WIDTH */
 .transcription-review,
 .translation-review {
     width: 100%;
     max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
 }
 
 .speaker-transcription-group,
@@ -688,8 +705,19 @@ header h1 i {
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 16px;
-    margin-bottom: 16px;
+    margin-bottom: 0; /* Handled by gap above */
     width: 100%;
+    box-sizing: border-box; /* Prevent padding from expanding width */
+}
+
+/* Ensure review list container doesn't collapse or overflow incorrectly */
+.review-list-container {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 200px;
+    /* Removed overflow:auto from here to let window scroll naturally */
 }
 
 .segment-edit-row,
@@ -1507,9 +1535,17 @@ header h1 i {
 
 /* Segments list scrollable */
 .segments-list {
-    max-height: 500px;
-    overflow-y: auto;
+    max-height: none; /* Allow segments to expand the speaker group */
     padding-right: 8px;
+}
+
+.review-list-container {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-height: 200px;
+    padding-bottom: 50px; /* Extra space for footer buttons */
 }
 
 /* Custom scrollbar styling */

@@ -1,4 +1,4 @@
-import { postFormData, getJSON, postJSON } from '../api.js';
+import { postFormData, getJSON, postJSON, formatTime } from '../api.js';
 import { doSwitchView } from '../app.js';
 
 window.openMonitor = openMonitor;
@@ -9,6 +9,7 @@ let currentWs = null;
 let currentTaskId = null;
 let downloadedVideoPath = null;
 let downloadedVideoFilename = null;  // Store filename for download
+let currentTaskState = {};           // Single source of truth for UI state
 
 // Speaker merge state
 let speakerMergeState = {
@@ -40,12 +41,7 @@ export function init() {
     const fileInput = document.getElementById('video-input');
     if (fileInput) fileInput.addEventListener('change', updateFileDisplay);
 
-    // 4. Bind Validation Confirm - will be dynamically rebound based on phase
-    const startDubBtn = document.getElementById('start-dub-btn');
-    if (startDubBtn) {
-        // Initial binding for transcription review
-        startDubBtn.addEventListener('click', startTranslationPhase);
-    }
+    // 4. Validation Confirm buttons are now dynamically created in the render functions based on the current phase
     
     // 5. Bind "New Project" button on result page
     const newProjectBtn = document.getElementById('result-new-project-btn');
@@ -150,6 +146,7 @@ export function startNewProject() {
     // Reset all state
     currentTaskId = null;
     downloadedVideoPath = null;
+    currentTaskState = {};
     speakerMergeState = { selected: new Set(), groups: [] };
     
     // Close any existing WebSocket
@@ -247,11 +244,21 @@ function showWizardStep(stepId) {
     } else {
         console.error(`Wizard step not found: ${stepId}`);
     }
+
+    // Toggle shared timeline header
+    const timeline = document.getElementById('task-timeline-header');
+    if (timeline) {
+        if (stepId === 'state-upload') {
+            timeline.classList.add('hidden');
+        } else {
+            timeline.classList.remove('hidden');
+        }
+    }
 }
 
 async function downloadYouTubeVideo() {
     if (!downloadedVideoPath) {
-        alert('No video available to download');
+        await window.uiAlert('No video available to download', 'Error');
         return;
     }
     
@@ -269,7 +276,7 @@ async function downloadYouTubeVideo() {
         
     } catch (err) {
         console.error('Download failed:', err);
-        alert('Download failed: ' + err.message);
+        await window.uiAlert('Download failed: ' + err.message, 'Error');
     }
 }
 
@@ -279,7 +286,7 @@ async function handleYouTubeDownload() {
     const btn = document.getElementById('download-youtube-btn');
     
     const url = urlInput.value.trim();
-    if (!url) return alert("Please enter a YouTube URL");
+    if (!url) return await window.uiAlert("Please enter a YouTube URL", "Input Required");
 
     try {
         btn.disabled = true;
@@ -388,7 +395,7 @@ async function handleUpload(e) {
         openMonitor(data.task_id);
 
     } catch (err) {
-        alert('Error starting project: ' + err.message);
+        await window.uiAlert('Error starting project: ' + err.message, 'Upload Failed');
         btn.disabled = false;
         btn.innerHTML = originalBtnContent;
     }
@@ -449,23 +456,34 @@ function connectWebSocket(taskId) {
             } else if (msg.type === 'status_update') {
                 renderTaskState(msg.data);
             } else if (msg.type === 'progress') {
-                updateMainProgress(msg.data);
+                // Merge progress into state and trigger a full re-render
+                currentTaskState.phase = msg.data.phase;
+                currentTaskState.progress = msg.data.percent;
+                currentTaskState.message = msg.data.message;
+                if (msg.data.phase === 'complete') currentTaskState.status = 'completed';
+                renderTaskState(currentTaskState);
             } else if (msg.type === 'log') {
                 logToTerm(msg.data.message, msg.data.style);
             } else if (msg.type === 'pong') {
                 // Keepalive response, no action needed
+            } else if (msg.type === 'speaker_validation_ready') {
+                Object.assign(currentTaskState, msg.data);
+                showSpeakerValidation(currentTaskState);
             } else if (msg.type === 'transcription_ready') {
                 showTranscriptionReview(msg.data);
             } else if (msg.type === 'translation_ready') {
                 showTranslationReview(msg.data);
+            } else if (msg.type === 'audio_ready') {
+                Object.assign(currentTaskState, msg.data);
+                showAudioValidation(currentTaskState);
             } else if (msg.type === 'transcription_validated') {
+                Object.assign(currentTaskState, msg.data);
                 logToTerm('Transcription validated, starting translation...', 'success');
-                // The server is now running translation, we should wait for translation_ready
-                // Don't transition UI yet - wait for translation results
+                renderTaskState(currentTaskState);
             } else if (msg.type === 'translation_validated') {
-                // Translation was validated by user, now starting TTS
+                Object.assign(currentTaskState, msg.data);
                 logToTerm('Translation validated, starting voice synthesis...', 'success');
-                showWizardStep('state-processing');
+                renderTaskState(currentTaskState);
             } else if (msg.type === 'validation_accepted') {
                 showWizardStep('state-processing');
             }
@@ -508,39 +526,85 @@ function connectWebSocket(taskId) {
     };
 }
 
-function renderTaskState(task) {
+async function renderTaskState(task) {
     console.log('Rendering task state:', task.status, task.phase);
+    Object.assign(currentTaskState, task);
+
+    // CRITICAL: If we are in a validation phase but segments are missing, 
+    // fetch the full task object from the API to ensure we have all data.
+    const isValidationPhase = task.status === 'awaiting_validation' || task.phase?.includes('awaiting');
+    const needsData = isValidationPhase && !task.segments && !task.transcribed_segments && !task.speaker_config;
     
-    // Update workflow chain if available
-    if (task.workflow_tasks) {
-        renderChain(task.workflow_tasks);
+    if (needsData && task.task_id) {
+        console.log("Validation phase detected with missing data, fetching full task state...");
+        try {
+            const fullTask = await getJSON(`/api/projects/${task.task_id}`);
+            Object.assign(currentTaskState, fullTask);
+        } catch (e) { console.error("Full task fetch failed:", e); }
     }
+
+    // Sync progress bar
+    const progressBar = document.getElementById('main-progress-bar');
+    const progressText = document.getElementById('processing-percent');
+    const statusText = document.getElementById('processing-status-text');
+
+    let pct = currentTaskState.progress || 0;
+    if (currentTaskState.status === 'completed' || currentTaskState.phase === 'complete') pct = 100;
+
+    if (progressBar) progressBar.style.width = `${pct}%`;
+    if (progressText) progressText.innerText = `${pct}%`;
+    if (statusText && currentTaskState.message) statusText.innerText = currentTaskState.message;
+
+    // Update workflow chain (Always use static chain as it represents the true live phases)
+    renderStaticChain(currentTaskState);
+
+    // CRITICAL: Ensure timeline is visible if we are processing (not upload)
+    const timeline = document.getElementById('task-timeline-header');
+    if (timeline && currentTaskState.phase !== 'init' && currentTaskState.status !== 'pending') {
+        timeline.classList.remove('hidden');
+    }
+
+    // Handle Granular Validation Phases
+    const phase = currentTaskState.phase;
+    const status = currentTaskState.status;
+    const hasSegments = (currentTaskState.segments && currentTaskState.segments.length > 0) || 
+                        (currentTaskState.transcribed_segments && currentTaskState.transcribed_segments.length > 0);
     
-    // Determine which step to show based on status/phase
-    if (task.status === 'awaiting_validation' || task.phase === 'awaiting_validation') {
-        showWizardStep('state-validation');
-        renderSpeakerConfig(task.speaker_config || {});
-        // Also set up merge UI
-        setupMergeUI(Object.keys(task.speaker_config || {}));
-    } else if (task.status === 'completed' || task.phase === 'complete') {
+    console.log(`UI State Check: phase=${phase}, status=${status}, hasSegments=${hasSegments}`);
+
+    // Check for validation phases - Priority to more advanced phases based on data availability
+    if (phase === 'awaiting_transcription_review' || (status === 'awaiting_validation' && hasSegments)) {
+        showTranscriptionReview(currentTaskState);
+    }
+    else if (phase === 'awaiting_speaker_validation' || (status === 'awaiting_validation' && !hasSegments)) {
+        showSpeakerValidation(currentTaskState);
+    } 
+    else if (phase === 'awaiting_translation_review') {
+        showTranslationReview({
+            segments: currentTaskState.segments || [],
+            target_language: currentTaskState.tgt_lang || 'en',
+            source_language: currentTaskState.src_lang || 'auto'
+        });
+    }
+    else if (phase === 'awaiting_audio_validation') {
+        showAudioValidation(currentTaskState);
+    }
+    else if (currentTaskState.status === 'completed' || phase === 'complete') {
         showWizardStep('state-result');
         const finalVideo = document.getElementById('final-video');
         const downloadBtn = document.getElementById('download-btn');
-        if (finalVideo && task.output_path) {
-            finalVideo.src = task.output_path;
+        if (finalVideo && currentTaskState.output_path) {
+            finalVideo.src = currentTaskState.output_path;
         }
-        if (downloadBtn && task.output_path) {
-            downloadBtn.href = task.output_path;
+        if (downloadBtn && currentTaskState.output_path) {
+            downloadBtn.href = currentTaskState.output_path;
         }
-    } else if (task.status === 'failed' || task.status === 'error') {
-        // Stay on processing page but show error
-        logToTerm(`FAILED: ${task.error_message || 'Unknown error'}`, 'error');
-        const statusText = document.getElementById('processing-status-text');
+    } else if (currentTaskState.status === 'failed' || currentTaskState.status === 'error') {
+        logToTerm(`FAILED: ${currentTaskState.error_message || 'Unknown error'}`, 'error');
         if (statusText) {
-            statusText.innerHTML = `<span style="color:var(--danger)">FAILED: ${task.error_message || 'Unknown error'}</span>`;
+            statusText.innerHTML = `<span style="color:var(--danger)">FAILED: ${currentTaskState.error_message || 'Unknown error'}</span>`;
         }
     } else {
-        // Processing, queued, etc. - ensure we're on processing step
         const processingStep = document.getElementById('state-processing');
         if (processingStep && processingStep.classList.contains('hidden')) {
             showWizardStep('state-processing');
@@ -548,40 +612,95 @@ function renderTaskState(task) {
     }
 }
 
-function renderChain(tasks) {
+function renderStaticChain(task) {
     const container = document.getElementById('granular-task-list');
     if (!container) return;
     
-    if (!tasks || tasks.length === 0) {
-        container.innerHTML = '<div class="empty-state">No workflow tasks yet...</div>';
-        return;
-    }
+    // Updated granular phases
+    const phases = [
+        { id: 'identifying', name: 'Speaker Diarization' },
+        { id: 'awaiting_speaker_validation', name: 'Speaker Confirmation' },
+        { id: 'transcribing', name: 'Transcription' },
+        { id: 'awaiting_transcription_review', name: 'Transcription Review' },
+        { id: 'translating', name: 'Translation' },
+        { id: 'awaiting_translation_review', name: 'Translation Review' },
+        { id: 'synthesizing', name: 'Voice Synthesis' },
+        { id: 'awaiting_audio_validation', name: 'Audio Review' },
+        { id: 'recomposing', name: 'Final Assembly' },
+        { id: 'complete', name: 'Completed' }
+    ];
+
+    let ph = task.phase || 'init';
+    let currentPhaseIdx = -1;
     
+    // Map backend phases to UI timeline index
+    const phaseMap = {
+        'init': 0,
+        'extraction': 0,
+        'identifying': 0, 
+        'samples': 0,
+        'awaiting_speaker_validation': 1,
+        'transcribing': 2, 'running_transcription': 2,
+        'awaiting_transcription_review': 3,
+        'translating': 4,
+        'awaiting_translation_review': 5,
+        'synthesizing': 6, 'tts_synthesis': 6,
+        'awaiting_audio_validation': 7,
+        'recomposing': 8,
+        'complete': 9, 'completed': 9
+    };
+    
+    currentPhaseIdx = phaseMap[ph] !== undefined ? phaseMap[ph] : 0;
+    if (task.status === 'completed') currentPhaseIdx = 9;
+
     let html = '';
-    tasks.forEach(t => {
-        const statusClass = t.status || 'pending';
+    phases.forEach((phaseObj, idx) => {
+        let statusClass = 'pending';
         let iconClass = 'fa-circle';
         
-        if (statusClass === 'completed') { iconClass = 'fa-check'; }
-        else if (statusClass === 'running') { iconClass = 'fa-spinner fa-spin'; }
-        else if (statusClass === 'failed') { iconClass = 'fa-times'; }
-        else if (statusClass === 'skipped') { iconClass = 'fa-forward'; }
-        else if (statusClass === 'cancelled') { iconClass = 'fa-ban'; }
+        if (idx < currentPhaseIdx) {
+            statusClass = 'completed';
+            iconClass = 'fa-check';
+        } else if (idx === currentPhaseIdx) {
+            if (task.status === 'failed' || task.status === 'error') {
+                statusClass = 'failed';
+                iconClass = 'fa-times';
+            } else if (task.status === 'paused') {
+                statusClass = 'skipped';
+                iconClass = 'fa-pause';
+            } else if (idx === 2 || idx === 4) { 
+                // UI review states
+                if (task.status === 'awaiting_validation' || task.phase === 'awaiting_translation_review') {
+                    statusClass = 'skipped'; 
+                    iconClass = 'fa-exclamation';
+                } else {
+                    statusClass = 'running';
+                    iconClass = 'fa-spinner fa-spin';
+                }
+            } else if (task.status === 'completed' || task.phase === 'complete') {
+                statusClass = 'completed';
+                iconClass = 'fa-check';
+            } else {
+                statusClass = 'running';
+                iconClass = 'fa-spinner fa-spin';
+            }
+        }
         
-        const showRestart = (statusClass === 'completed' || statusClass === 'failed');
+        const showRestart = (statusClass === 'completed' || statusClass === 'failed') && 
+                            ['init', 'identifying', 'translating', 'tts_synthesis', 'recomposing'].includes(phaseObj.id);
         
         html += `
-            <div id="task-node-${t.task_name}" class="task-node ${statusClass}">
+            <div id="task-node-${phaseObj.id}" class="task-node ${statusClass}">
                 <div class="node-icon-wrapper">
                     <i class="node-icon fas ${iconClass}"></i>
                 </div>
                 <div class="node-content">
                     <div>
-                        <span class="node-title">${t.task_name.replace(/_/g, ' ')}</span>
-                        ${t.message ? `<span class="node-status-text">- ${t.message}</span>` : ''}
+                        <span class="node-title">${phaseObj.name}</span>
+                        ${idx === currentPhaseIdx && task.message ? `<span class="node-status-text">- ${task.message}</span>` : ''}
                     </div>
                     ${showRestart ? `
-                        <button class="restart-btn" onclick="restartFromTask('${t.task_name}')" title="Restart from here">
+                        <button class="restart-btn" onclick="restartFromTask('${phaseObj.id}')" title="Restart from here">
                             <i class="fas fa-redo-alt"></i>
                         </button>
                     ` : ''}
@@ -592,17 +711,25 @@ function renderChain(tasks) {
     container.innerHTML = html;
 }
 
-function updateTaskProgress(data) {
-    const node = document.getElementById(`task-node-${data.task_name}`);
-    if (node) {
-        node.className = `task-node running`;
-        const icon = node.querySelector('.node-icon');
-        if (icon) icon.className = 'node-icon fas fa-spinner fa-spin';
-    }
-}
+// Removed legacy renderChain and updateTaskProgress functions to prevent UI freezing
+
+// Ensure accessible globally for dynamic button HTML
+window.restartFromTask = restartFromTask;
 
 async function restartFromTask(taskName) {
-    if (!confirm(`Restart from '${taskName}'? This will re-run this step and all following steps.`)) return;
+    // Map UI static step IDs to backend phases
+    const phaseMap = {
+        'init': 'init',
+        'identifying': 'identifying',
+        'translating': 'running_translation', // Route directly to translation runner
+        'tts_synthesis': 'tts_synthesis',
+        'recomposing': 'recomposing'
+    };
+    
+    const backendPhase = phaseMap[taskName] || 'init';
+
+    const confirmed = await window.uiConfirm(`Restart from '${taskName}'? This will re-run this step and all following steps.`, 'Restart Workflow');
+    if (!confirmed) return;
     
     // Clear the terminal logs when restarting
     const term = document.getElementById('processing-term');
@@ -625,7 +752,7 @@ async function restartFromTask(taskName) {
     if (statusText) statusText.innerText = 'Restarting...';
     
     try {
-        await postJSON(`/api/projects/${currentTaskId}/restart`, { from_task: taskName });
+        await postJSON(`/api/projects/${currentTaskId}/restart`, { from_phase: backendPhase });
         
         // Reload to get fresh state
         setTimeout(() => {
@@ -633,21 +760,12 @@ async function restartFromTask(taskName) {
         }, 500);
         
     } catch (e) {
-        alert("Restart failed: " + e.message);
+        await window.uiAlert("Restart failed: " + e.message, "Error");
         logToTerm(`Restart failed: ${e.message}`, 'error');
     }
 }
 
-function updateMainProgress(data) {
-    const bar = document.getElementById('main-progress-bar');
-    if(bar) bar.style.width = `${data.percent}%`;
-    
-    const txt = document.getElementById('processing-percent');
-    if(txt) txt.innerText = `${data.percent}%`;
-    
-    const status = document.getElementById('processing-status-text');
-    if(status) status.innerText = data.message || '';
-}
+// Removed updateMainProgress as renderTaskState handles all UI syncing now
 
 function logToTerm(msg, style='info') {
     const term = document.getElementById('processing-term');
@@ -838,97 +956,15 @@ function updateSpeakerCardsForMerge() {
     });
 }
 
-// NEW: Show transcription review UI
-// NEW: Show transcription review UI
-function showTranscriptionReview(data) {
-    showWizardStep('state-validation');
-    
-    // Update header to indicate transcription review
-    const header = document.querySelector('#state-validation h3');
-    if (header) {
-        header.innerHTML = '<i class="fas fa-file-audio"></i> Review Transcriptions';
-    }
-    
-    // Render editable transcription table
-    const grid = document.getElementById('speaker-grid');
-    if (!grid) return;
-    
-    const segments = data.segments || [];
-    const speakerConfig = data.speaker_config || {};
-    
-    // Group segments by speaker
-    const bySpeaker = {};
-    segments.forEach(seg => {
-        const sid = seg.speaker_id;
-        if (!bySpeaker[sid]) bySpeaker[sid] = [];
-        bySpeaker[sid].push(seg);
-    });
-    
-    // Build review UI
-    let html = '<div class="transcription-review">';
-    html += '<p class="subtitle" style="margin-bottom:20px;">Review and edit what each speaker said. You can correct transcription errors before translation.</p>';
-    
-    Object.entries(bySpeaker).forEach(([sid, segs]) => {
-        const spkInfo = speakerConfig[sid] || { name: `Speaker ${parseInt(sid)+1}` };
-        
-        html += `
-            <div class="speaker-transcription-group" data-speaker="${sid}">
-                <div class="spk-header" style="margin-bottom:15px;">
-                    <span class="avatar">${parseInt(sid) + 1}</span>
-                    <input type="text" class="spk-name" value="${spkInfo.name}" 
-                           style="flex:1; background:var(--bg-panel); border:1px solid var(--border); color:var(--text-main); padding:8px; border-radius:4px;">
-                    <audio controls src="${spkInfo.sample_path}" style="width:200px; margin-left:10px;"></audio>
-                </div>
-                <div class="segments-list">
-        `;
-        
-        segs.forEach((seg, idx) => {
-            const timeStr = formatTime(seg.start) + ' - ' + formatTime(seg.end);
-            html += `
-                <div class="segment-edit-row" data-idx="${seg.idx}" style="margin-bottom:12px; padding:12px; background:var(--bg-main); border-radius:6px; border:1px solid var(--border);">
-                    <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-size:0.85rem; color:var(--text-muted);">
-                        <span><i class="fas fa-clock"></i> ${timeStr}</span>
-                        <span>Segment ${seg.idx + 1}</span>
-                    </div>
-                    <label style="display:block; margin-bottom:4px; font-size:0.8rem; color:var(--text-muted);">Original Text:</label>
-                    <textarea class="seg-original" data-idx="${seg.idx}" rows="2" 
-                        style="width:100%; background:var(--bg-panel); border:1px solid var(--border); color:var(--text-main); padding:8px; border-radius:4px; margin-bottom:8px; font-family:inherit; resize:vertical;">${seg.original_text || ''}</textarea>
-                    <div style="display:flex; gap:8px; align-items:center;">
-                        <label style="font-size:0.8rem; color:var(--text-muted);">
-                            <input type="checkbox" class="seg-include" checked> Include in dubbing
-                        </label>
-                    </div>
-                </div>
-            `;
-        });
-        
-        html += '</div></div>';
-    });
-    
-    html += '</div>';
-    grid.innerHTML = html;
-    
-    // Update button - CRITICAL FIX: Use event delegation instead of cloning
-    const startBtn = document.getElementById('start-dub-btn');
-    if (startBtn) {
-        // Clear existing handlers by replacing with fresh element
-        const parent = startBtn.parentNode;
-        const freshBtn = document.createElement('button');
-        freshBtn.id = 'start-dub-btn';
-        freshBtn.className = 'btn-success';
-        freshBtn.innerHTML = '<i class="fas fa-language"></i> Translate & Continue';
-        freshBtn.disabled = false;
-        
-        parent.replaceChild(freshBtn, startBtn);
-        
-        // Bind handler
-        freshBtn.addEventListener('click', submitTranscriptionReview);
-    }
-}
-
 // NEW: Show translation review UI
 function showTranslationReview(data) {
     showWizardStep('state-validation');
+    
+    // Hide merge section and subtitle for translation review
+    const mergeSection = document.querySelector('.merge-section');
+    const subtitleText = document.querySelector('#state-validation > .subtitle');
+    if (mergeSection) mergeSection.style.display = 'none';
+    if (subtitleText) subtitleText.style.display = 'none';
     
     // Update header
     const header = document.querySelector('#state-validation h3');
@@ -938,6 +974,9 @@ function showTranslationReview(data) {
     
     const grid = document.getElementById('speaker-grid');
     if (!grid) return;
+    
+    // Use full-width list mode
+    grid.className = 'review-list-container';
     
     const segments = data.segments || [];
     const tgtLang = data.target_language || 'en';
@@ -996,165 +1035,58 @@ function showTranslationReview(data) {
     html += '</div>';
     grid.innerHTML = html;
     
-    // Update button - CRITICAL FIX: Use event delegation instead of cloning
-    const startBtn = document.getElementById('start-dub-btn');
-    if (startBtn) {
-        // Clear existing handlers by replacing with fresh element
-        const parent = startBtn.parentNode;
-        const freshBtn = document.createElement('button');
-        freshBtn.id = 'start-dub-btn';
-        freshBtn.className = 'btn-success';
-        freshBtn.innerHTML = '<i class="fas fa-microphone"></i> Generate Voices';
-        freshBtn.disabled = false;
-        
-        parent.replaceChild(freshBtn, startBtn);
-        
-        // Bind handler
-        freshBtn.addEventListener('click', submitTranslationReview);
+    // Update header actions container with retry and generate buttons
+    const headerActions = document.querySelector('#state-validation .header-actions');
+    if (headerActions) {
+        headerActions.innerHTML = `
+            <button id="retry-translation-btn" class="btn-secondary">
+                <i class="fas fa-redo"></i> Retry Translation
+            </button>
+            <button id="start-dub-btn" class="btn-success">
+                <i class="fas fa-microphone"></i> Generate Voices
+            </button>
+        `;
+        document.getElementById('start-dub-btn').addEventListener('click', submitTranslationReview);
+        document.getElementById('retry-translation-btn').addEventListener('click', () => {
+            restartFromTask('translating');
+        });
     }
 }
 
 // NEW: Submit transcription review
 // NEW: Submit transcription review
-async function submitTranscriptionReview() {
-    console.log('submitTranscriptionReview called');
+// 1. Speaker Validation UI
+async function showSpeakerValidation(data) {
+    console.log("Showing speaker validation with data:", data);
+    showWizardStep('state-validation');
+    const header = document.querySelector('#state-validation h3');
+    if (header) header.innerHTML = '<i class="fas fa-user-check"></i> Step 1: Confirm Speakers';
     
-    // Collect edited transcriptions
-    const editedSegments = [];
+    // Show merge, hide others
+    const mergeSection = document.querySelector('.merge-section');
+    const subtitleText = document.querySelector('#state-validation > .subtitle');
+    if (mergeSection) mergeSection.style.display = 'block';
+    if (subtitleText) subtitleText.style.display = 'block';
     
-    document.querySelectorAll('.segment-edit-row').forEach(row => {
-        const idx = parseInt(row.dataset.idx);
-        const originalText = row.querySelector('.seg-original').value;
-        const include = row.querySelector('.seg-include').checked;
-        
-        // Find speaker ID from parent group
-        const speakerGroup = row.closest('.speaker-transcription-group');
-        const speakerId = speakerGroup ? parseInt(speakerGroup.dataset.speaker) : 0;
-        
-        editedSegments.push({
-            idx: idx,
-            speaker_id: speakerId,
-            original_text: originalText,
-            include: include,
-            // Preserve timing info - will be filled from original
-        });
-    });
-    
-    // Also collect speaker config updates
-    const speakers = {};
-    document.querySelectorAll('.speaker-transcription-group').forEach(group => {
-        const sid = group.dataset.speaker;
-        const nameInput = group.querySelector('.spk-name');
-        speakers[sid] = {
-            name: nameInput ? nameInput.value : `Speaker ${parseInt(sid)+1}`,
-            action: 'dub'  // Default, can be changed
-        };
-    });
-    
-    console.log(`Collected ${editedSegments.length} edited segments, ${Object.keys(speakers).length} speakers`);
-    
-    // Get the button - it may have been replaced, so find it fresh
-    const btn = document.getElementById('start-dub-btn');
-    if (!btn) {
-        console.error('Translate & Continue button not found!');
-        alert('Error: Button not found');
-        return;
-    }
-    
-    const originalContent = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting Translation...';
-    
-    try {
-        console.log(`Sending validate request for task ${currentTaskId}`);
-        const response = await postJSON(`/api/projects/${currentTaskId}/validate`, { 
-            speakers: speakers,
-            edited_segments: editedSegments,
-            proceed_to_translation: true
-        });
-        console.log('validate response:', response);
-        
-        // Show processing state while waiting for translation to complete
-        showWizardStep('state-processing');
-        logToTerm('Translation in progress...', 'info');
-        
-        // WebSocket will send translation_ready when complete
-    } catch(err) {
-        console.error('Transcription validation error:', err);
-        alert("Error: " + err.message);
-        logToTerm(`Validation error: ${err.message}`, 'error');
-        btn.disabled = false;
-        btn.innerHTML = originalContent;
-    }
-}
-
-// NEW: Submit translation review
-async function submitTranslationReview() {
-    console.log('submitTranslationReview called');
-    
-    // Collect edited translations
-    const editedSegments = [];
-    
-    document.querySelectorAll('.translation-edit-row').forEach(row => {
-        const idx = parseInt(row.dataset.idx);
-        const translatedText = row.querySelector('.seg-translated').value;
-        const originalText = row.querySelector('.original-text').textContent.trim();
-        
-        editedSegments.push({
-            idx: idx,
-            original_text: originalText,
-            translated_text: translatedText
-        });
-    });
-    
-    console.log(`Collected ${editedSegments.length} edited segments`);
-    
-    // Get the button - it may have been replaced, so find it fresh
-    const btn = document.getElementById('start-dub-btn');
-    if (!btn) {
-        console.error('Generate Voices button not found!');
-        alert('Error: Button not found');
-        return;
-    }
-    
-    const originalContent = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting Voice Synthesis...';
-    
-    try {
-        console.log(`Sending validate-translation request for task ${currentTaskId}`);
-        // Send flat structure - the backend will handle it
-        const response = await postJSON(`/api/projects/${currentTaskId}/validate-translation`, { 
-            edited_segments: editedSegments,
-            proceed_to_tts: true
-        });
-        console.log('validate-translation response:', response);
-        
-        // WebSocket will handle transition to processing
-        showWizardStep('state-processing');
-        logToTerm('Voice synthesis starting...', 'info');
-    } catch(err) {
-        console.error('Translation validation error:', err);
-        alert("Error: " + err.message);
-        logToTerm(`Translation validation error: ${err.message}`, 'error');
-        btn.disabled = false;
-        btn.innerHTML = originalContent;
-    }
-}
-
-// Legacy function - kept for compatibility
-function renderSpeakerConfig(config) {
     const grid = document.getElementById('speaker-grid');
     if(!grid) return;
     
+    grid.className = 'speaker-grid';
+    // Robustly find config in either data or data.data
+    const config = data.speaker_config || data.data?.speaker_config || {};
     const entries = Object.entries(config);
+
     if (entries.length === 0) {
-        grid.innerHTML = '<div class="empty-state">No speakers detected</div>';
+        grid.innerHTML = `
+            <div class="empty-state">
+                <i class="fas fa-user-slash"></i>
+                <p>No speakers detected in the audio.</p>
+                <button class="btn-secondary" onclick="restartFromTask('init')">Try Again</button>
+            </div>`;
         return;
     }
-    
+
     grid.innerHTML = entries.map(([id, info]) => {
-        // Check if this speaker is merged into another
         const mergedGroup = speakerMergeState.groups.find(g => g.includes(id));
         const isMaster = mergedGroup && mergedGroup[0] === id;
         const isMerged = mergedGroup && !isMaster;
@@ -1177,87 +1109,233 @@ function renderSpeakerConfig(config) {
                 <input type="text" class="spk-name" value="${info.name || 'Speaker '+ (parseInt(id)+1)}" placeholder="Speaker Name" ${isMerged ? 'disabled' : ''}>
             </div>
             <audio controls src="${info.sample_path}" style="width:100%; margin-top:10px;"></audio>
-        </div>
-    `}).join('');
-    
-    // Re-apply merge styling
+        </div>`;
+    }).join('');
+
+    setupMergeUI(Object.keys(config));
     updateSpeakerCardsForMerge();
+
+    const actions = document.querySelector('#state-validation .header-actions');
+    actions.innerHTML = `
+        <button id="confirm-speakers-btn" class="btn-success">
+            <i class="fas fa-check"></i> Confirm & Transcribe
+        </button>
+    `;
+    document.getElementById('confirm-speakers-btn').onclick = submitSpeakerValidation;
 }
 
-// Helper for time formatting
-function formatTime(seconds) {
-    if (!seconds || isNaN(seconds)) return '00:00';
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    const ms = Math.floor((seconds % 1) * 100);
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
-}
-
-async function startTranslationPhase() {
+async function submitSpeakerValidation() {
     const speakers = {};
-    const cards = document.querySelectorAll('.speaker-card');
+    const mergeMap = {};
     
-    if (cards.length === 0) {
-        alert('No speakers configured');
+    speakerMergeState.groups.forEach(group => {
+        const master = group[0];
+        group.slice(1).forEach(id => mergeMap[id] = master);
+    });
+    
+    document.querySelectorAll('.speaker-card').forEach(card => {
+        const id = card.dataset.id;
+        const name = card.querySelector('.spk-name').value;
+        const isDub = card.querySelector('.spk-toggle').checked;
+        const mergedInto = mergeMap[id];
+        
+        // Find merged children if this is a master
+        const merged_speakers = [];
+        speakerMergeState.groups.forEach(group => {
+            if (group[0] === id) merged_speakers.push(...group.slice(1));
+        });
+
+        speakers[id] = {
+            name: name,
+            action: mergedInto ? 'remove' : (isDub ? 'dub' : 'remove'),
+            merged_into: mergedInto,
+            merged_speakers: merged_speakers
+        };
+    });
+    
+    try {
+        await postJSON(`/api/projects/${currentTaskId}/validate-speakers`, { speakers });
+        currentTaskState.phase = 'transcribing';
+        showWizardStep('state-processing');
+    } catch (e) {
+        await window.uiAlert("Validation failed: " + e.message, "Error");
+    }
+}
+
+// 2. Transcription Review UI
+function showTranscriptionReview(data) {
+    console.log("Rendering Transcription Review UI...");
+    showWizardStep('state-validation');
+    
+    // Explicitly hide Step 1 elements
+    const mergeSection = document.querySelector('.merge-section');
+    const step1Subtitle = document.querySelector('#state-validation > .subtitle');
+    if (mergeSection) mergeSection.style.display = 'none';
+    if (step1Subtitle) step1Subtitle.style.display = 'none';
+    
+    const header = document.querySelector('#state-validation h3');
+    if (header) header.innerHTML = '<i class="fas fa-file-alt"></i> Step 2: Review Transcription';
+    
+    const grid = document.getElementById('speaker-grid');
+    if (!grid) return;
+
+    // Clear old buttons immediately to prevent UI confusion
+    
+    const actions = document.getElementById('validation-actions-container');
+    if (actions) actions.innerHTML = '';
+
+    grid.className = 'review-list-container';
+    grid.innerHTML = '<div class="empty-state"><i class="fas fa-spinner fa-spin"></i> Preparing transcript...</div>';
+    
+    // Look for segments in all possible locations
+    let segments = data.transcribed_segments || data.segments || data.data?.transcribed_segments || data.data?.segments || [];
+    let speakerConfig = data.speaker_config || data.data?.speaker_config || {};
+
+    console.log(`Found ${Array.isArray(segments) ? segments.length : '0'} segments to render.`);
+
+    // Handle stringified JSON from database
+    if (typeof segments === 'string') {
+        try { segments = JSON.parse(segments); } catch(e) { console.error("Parse segments failed", e); }
+    }
+    if (typeof speakerConfig === 'string') {
+        try { speakerConfig = JSON.parse(speakerConfig); } catch(e) { console.error("Parse config failed", e); }
+    }
+
+    if (!Array.isArray(segments) || segments.length === 0) {
+        grid.innerHTML = '<div class="empty-state">No transcription segments found.</div>';
         return;
     }
     
-    // Build merge mapping and speaker config
-    const mergeMap = {};  // merged speaker -> master speaker
-    speakerMergeState.groups.forEach(group => {
-        const master = group[0];
-        // Map all non-master speakers in group to the master
-        group.slice(1).forEach(id => {
-            mergeMap[id] = master;
+    // Group segments by speaker
+    const bySpeaker = {};
+    segments.forEach(seg => {
+        const sid = seg.speaker_id;
+        if (!bySpeaker[sid]) bySpeaker[sid] = [];
+        bySpeaker[sid].push(seg);
+    });
+    
+    let html = '<div class="transcription-review">';
+    
+    Object.entries(bySpeaker).forEach(([sid, segs]) => {
+        const spkInfo = speakerConfig[sid] || { name: `Speaker ${parseInt(sid)+1}` };
+        html += `
+            <div class="speaker-transcription-group">
+                <div class="spk-header">
+                    <span class="avatar">${parseInt(sid) + 1}</span>
+                    <span style="font-weight:600">${spkInfo.name}</span>
+                </div>
+                <div class="segments-list">
+        `;
+        
+        segs.forEach(seg => {
+            const timeStr = formatTime(seg.start) + ' - ' + formatTime(seg.end);
+            html += `
+                <div class="segment-edit-row" data-idx="${seg.idx}" data-speaker="${sid}" data-start="${seg.start}" data-end="${seg.end}">
+                    <div style="font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">${timeStr}</div>
+                    <textarea class="seg-original" style="width:100%">${seg.original_text || ''}</textarea>
+                </div>
+            `;
+        });
+        html += '</div></div>';
+    });
+    html += '</div>';
+    grid.innerHTML = html;
+    
+    // Reuse the 'actions' variable declared at the top of the function
+    if (actions) {
+        actions.innerHTML = `
+            <button id="confirm-transcription-btn" class="btn-success">
+                <i class="fas fa-language"></i> Confirm & Translate
+            </button>
+        `;
+        const confirmBtn = document.getElementById('confirm-transcription-btn');
+        if (confirmBtn) confirmBtn.onclick = submitTranscriptionReview;
+    }
+}
+
+async function submitTranscriptionReview() {
+    const segments = [];
+    document.querySelectorAll('.segment-edit-row').forEach(row => {
+        segments.push({
+            idx: parseInt(row.dataset.idx),
+            speaker_id: parseInt(row.dataset.speaker),
+            start: parseFloat(row.dataset.start),
+            end: parseFloat(row.dataset.end),
+            original_text: row.querySelector('.seg-original').value,
+            translated_text: "" // Clear translation if text changed
         });
     });
     
-    cards.forEach(card => {
-        const id = card.dataset.id;
-        const name = card.querySelector('.spk-name').value;
-        const isDubbing = card.querySelector('.spk-toggle').checked;
-        
-        // Check if this speaker is merged into another
-        const mergedInto = mergeMap[id];
-        
-        if (mergedInto) {
-            // Merged speaker: mark as remove (segments will use master's voice)
-            // but record the merge info for the backend
-            speakers[id] = { 
-                name: name || `Speaker ${parseInt(id) + 1}`, 
-                action: 'remove',
-                merged_into: mergedInto  // Tell backend which master to use
-            };
-        } else {
-            // Master speaker or unmerged speaker
-            // Check if this speaker has others merged into it
-            const mergedSpeakers = [];
-            speakerMergeState.groups.forEach(group => {
-                if (group[0] === id) {
-                    mergedSpeakers.push(...group.slice(1));
-                }
-            });
-            
-            speakers[id] = { 
-                name: name || `Speaker ${parseInt(id) + 1}`, 
-                action: isDubbing ? 'dub' : 'remove',
-                merged_speakers: mergedSpeakers  // Tell backend which speakers are merged into this one
-            };
-        }
-    });
+    await postJSON(`/api/projects/${currentTaskId}/validate-transcription`, { segments });
+    currentTaskState.phase = 'translating';
+    showWizardStep('state-processing');
+}
 
+// 3. Translation Review - Handled by specialized logic below
+
+// 4. Audio Validation (New)
+function showAudioValidation(data) {
+    showWizardStep('state-validation');
+    document.querySelector('.merge-section').style.display = 'none';
+    
+    const header = document.querySelector('#state-validation h3');
+    header.innerHTML = '<i class="fas fa-volume-up"></i> Step 4: Review Audio';
+    
+    const grid = document.getElementById('speaker-grid');
+    grid.innerHTML = `
+        <div style="text-align:center; padding:20px;">
+            <p>Audio segments generated. You can listen to the preview below.</p>
+            <!-- Add a simple list of generated segments to play -->
+            <div style="max-height:400px; overflow-y:auto; text-align:left;">
+                ${(data.segments || []).map(s => `
+                    <div style="padding:10px; border-bottom:1px solid var(--border);">
+                        <div>Segment ${s.idx + 1} (${formatTime(s.start)}-${formatTime(s.end)})</div>
+                        <audio controls src="/api/projects/${currentTaskId}/preview/${s.idx}" style="width:100%; margin-top:5px;"></audio>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+    
+    const actions = document.querySelector('#state-validation .header-actions');
+    actions.innerHTML = `
+        <button id="confirm-audio-btn" class="btn-success">
+            <i class="fas fa-film"></i> Confirm & Build Video
+        </button>
+    `;
+    document.getElementById('confirm-audio-btn').onclick = async () => {
+        await postJSON(`/api/projects/${currentTaskId}/validate-audio`, {});
+        currentTaskState.phase = 'recomposing';
+        showWizardStep('state-processing');
+    };
+}
+
+// NEW: Submit translation review
+async function submitTranslationReview() {
+    const editedSegments = [];
+    document.querySelectorAll('.translation-edit-row').forEach(row => {
+        editedSegments.push({
+            idx: parseInt(row.dataset.idx),
+            original_text: row.querySelector('.original-text').textContent.trim(),
+            translated_text: row.querySelector('.seg-translated').value
+        });
+    });
+    
     const btn = document.getElementById('start-dub-btn');
+    if (!btn) return;
+    
     const originalContent = btn.innerHTML;
     btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting...';
-    
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting Voice Synthesis...';
+
     try {
-        await postJSON(`/api/projects/${currentTaskId}/validate`, { speakers });
-        // WebSocket will handle the transition to processing state
+        await postJSON(`/api/projects/${currentTaskId}/validate-translation`, { 
+            segments: editedSegments,
+            proceed_to_tts: true
+        });
         showWizardStep('state-processing');
     } catch(err) {
-        alert("Error: " + err.message);
-        logToTerm(`Validation error: ${err.message}`, 'error');
+        await window.uiAlert("Error: " + err.message, 'Validation Failed');
         btn.disabled = false;
         btn.innerHTML = originalContent;
     }
