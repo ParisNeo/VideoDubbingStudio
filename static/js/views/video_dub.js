@@ -160,7 +160,7 @@ export function startNewProject() {
     }
     
     const startBtn = document.getElementById('start-btn');
-    if (startBtn) startBtn.disabled = true;
+    if (startBtn) startBtn.disabled = false;
     
     const term = document.getElementById('processing-term');
     if (term) term.innerHTML = '';
@@ -299,8 +299,6 @@ async function handleYouTubeDownload() {
             
             connectWebSocket(currentTaskId);
             showWizardStep('state-upload');
-
-            document.getElementById('start-btn').disabled = false;
         } else {
             throw new Error(res.error || "Unknown error");
         }
@@ -607,7 +605,7 @@ async function renderTaskState(task) {
     // or if we are currently in the 'processing' catch-all view
     if (targetPhaseUI !== 'processing') {
         if (phaseChanged || activeUIPhase === 'processing') {
-            jumpToPhaseReview(targetPhaseUI);
+            jumpToPhaseReview(targetPhaseUI, false);
         }
     } else {
         showWizardStep('state-processing');
@@ -708,7 +706,7 @@ function renderStaticChain(task) {
                             ['init', 'identifying', 'transcribing', 'translating', 'synthesizing', 'recomposing'].includes(phaseObj.id);
         
         html += `
-            <div id="task-node-${phaseObj.id}" class="task-node ${statusClass} ${nodeTypeClass}" onclick="jumpToPhaseReview('${phaseObj.id}')">
+            <div id="task-node-${phaseObj.id}" class="task-node ${statusClass} ${nodeTypeClass}" onclick="jumpToPhaseReview('${phaseObj.id}', true)">
                 <div class="node-icon-wrapper">
                     <i class="node-icon fas ${iconClass}"></i>
                 </div>
@@ -731,11 +729,13 @@ function renderStaticChain(task) {
 
 /**
  * Force switches the UI to a specific phase, fetching data if necessary.
+ * @param {string} phaseId - The ID of the phase to show
+ * @param {boolean} isManual - If true, triggers the "Stop Task" confirmation logic
  */
-async function jumpToPhaseReview(phaseId) {
+async function jumpToPhaseReview(phaseId, isManual = false) {
     if (!currentTaskId) return;
 
-    console.log(`Manual Jump Requested: ${phaseId}`);
+    console.log(`${isManual ? 'Manual' : 'System'} Jump Requested: ${phaseId}`);
 
     // 1. Force state refresh to ensure we have the most recent data (speaker configs, etc)
     const isValidationPhase = phaseId.includes('awaiting_') || phaseId === 'init';
@@ -751,21 +751,24 @@ async function jumpToPhaseReview(phaseId) {
     // 2. Update tracked UI phase so re-renders keep the highlight
     activeUIPhase = phaseId;
 
-    const isProcessing = ['processing', 'queued', 'running'].includes(currentTaskState.status);
-    
-    if (isProcessing && currentTaskState.phase !== phaseId && phaseId !== 'complete') {
-        const confirmed = await window.uiConfirm(
-            `An AI process is currently running.\n\nJumping to another step will STOP the current process.\n\nDo you want to proceed?`,
-            "Stop Current Task?"
-        );
-        if (!confirmed) return;
+    // Only show "Stop Task" confirmation if the user clicked the timeline manually
+    if (isManual) {
+        const isProcessing = ['processing', 'queued', 'running'].includes(currentTaskState.status);
         
-        try {
-            await postJSON(`/api/projects/${currentTaskId}/cancel`, {});
-            logToTerm(`Task stopped by user. Routing to ${phaseId} UI...`, "warning");
-            currentTaskState.status = 'paused';
-        } catch (e) {
-            console.error("Stop failed:", e);
+        if (isProcessing && currentTaskState.phase !== phaseId && phaseId !== 'complete') {
+            const confirmed = await window.uiConfirm(
+                `An AI process is currently running.\n\nJumping to another step will STOP the current process.\n\nDo you want to proceed?`,
+                "Stop Current Task?"
+            );
+            if (!confirmed) return;
+            
+            try {
+                await postJSON(`/api/projects/${currentTaskId}/cancel`, {});
+                logToTerm(`Task stopped by user. Routing to ${phaseId} UI...`, "warning");
+                currentTaskState.status = 'paused';
+            } catch (e) {
+                console.error("Stop failed:", e);
+            }
         }
     }
 
@@ -1179,7 +1182,8 @@ function showSpeakerValidation(data) {
 
 async function submitSpeakerValidation() {
     // Optimistic UI update: Switch to processing view immediately
-    activeUIPhase = 'transcribing';
+    // Set to 'processing' to prevent WS updates from jumping back to validation
+    activeUIPhase = 'processing';
     showWizardStep('state-processing');
     renderStaticChain(currentTaskState);
 
@@ -1359,7 +1363,7 @@ async function submitTranscriptionReview() {
     const segments = getSegmentsFromUI();
 
     // Optimistic UI update: Switch to processing view immediately
-    activeUIPhase = 'translating';
+    activeUIPhase = 'processing';
     showWizardStep('state-processing');
     renderStaticChain(currentTaskState);
     
@@ -1529,7 +1533,7 @@ async function saveStepProgress(stepType) {
 
 async function submitTranslationReview() {
     // Optimistic UI update: Switch to processing view immediately
-    activeUIPhase = 'synthesizing';
+    activeUIPhase = 'processing';
     showWizardStep('state-processing');
     renderStaticChain(currentTaskState);
 
