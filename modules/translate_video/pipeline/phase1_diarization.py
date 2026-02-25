@@ -673,10 +673,11 @@ async def run_transcription_phase(
                 filtered_segments.append(SpeechSegment.from_dict(s_data))
         
         segments = filtered_segments
-        await report("transcribing", 10, f"Starting transcription for {len(segments)} valid segments...")
+        await report("transcribing", 35, f"Starting transcription for {len(segments)} valid segments...")
         
         def trans_progress_sync(cur, tot):
-            current_pct = 10 + int((cur / tot) * 40)
+            # Map 35% -> 60% to bridge the gap to Translation phase
+            current_pct = 35 + int((cur / tot) * 25)
             asyncio.run_coroutine_threadsafe(report("transcribing", current_pct, f"Transcribed {cur}/{tot}"), loop)
 
         # Get whisper model preference from task
@@ -694,7 +695,7 @@ async def run_transcription_phase(
             transcribed_segments=[s.to_dict() for s in segments],
             phase="awaiting_transcription_review",
             status="awaiting_validation",
-            progress=50,
+            progress=60,
             message="Please review the transcription text"
         )
         

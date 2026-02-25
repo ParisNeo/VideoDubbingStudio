@@ -572,18 +572,14 @@ async function renderTaskState(task) {
 
     let targetPhaseUI = phase;
 
-    const processingToInteractionMap = {
-        'identifying': 'init',
-        'transcribing': 'awaiting_speaker_validation',
-        'translating': 'awaiting_transcription_review',
-        'synthesizing': 'awaiting_translation_review',
-        'recomposing': 'awaiting_audio_validation'
-    };
+    // If the server is in a computing phase, the UI should stay in 'processing' (Log View)
+    // unless the user manually jumps elsewhere.
+    const computingPhases = ['identifying', 'transcribing', 'translating', 'synthesizing', 'recomposing'];
 
     if (interactionPhases.includes(phase)) {
         targetPhaseUI = phase;
-    } else if (processingToInteractionMap[phase]) {
-        targetPhaseUI = processingToInteractionMap[phase];
+    } else if (computingPhases.includes(phase)) {
+        targetPhaseUI = 'processing';
     } else if (status === 'awaiting_validation') {
         if (currentTaskState.translation_segments) targetPhaseUI = 'awaiting_audio_validation';
         else if (currentTaskState.transcribed_segments) targetPhaseUI = 'awaiting_translation_review';
