@@ -43,7 +43,13 @@ class TaskManager:
             status = task.get('status', 'pending')
             
             # CRITICAL: Don't start if we're waiting for user input
-            if phase in ['awaiting_validation', 'awaiting_translation_review']:
+            interaction_phases = [
+                'awaiting_speaker_validation', 
+                'awaiting_transcription_review', 
+                'awaiting_translation_review', 
+                'awaiting_audio_validation'
+            ]
+            if phase in interaction_phases or status == 'awaiting_validation':
                 print(f"Task {task_id} is in '{phase}' state, waiting for user input - not starting pipeline")
                 return
             
@@ -87,10 +93,14 @@ class TaskManager:
                 })
             
             # Waiting states - do not re-run, just return
-            if phase in ['awaiting_validation', 'awaiting_translation_review']:
-                # Task is waiting for user input via WebSocket
-                await report(phase, task.get('progress', 35), 
-                    "Waiting for user review..." if phase == 'awaiting_validation' else "Waiting for translation review...")
+            interaction_phases = [
+                'awaiting_speaker_validation', 
+                'awaiting_transcription_review', 
+                'awaiting_translation_review', 
+                'awaiting_audio_validation'
+            ]
+            if phase in interaction_phases:
+                await report(phase, task.get('progress', 35), "Waiting for user review...")
                 return  # CRITICAL: Early return to prevent re-running
             
             # Import new granular phases
@@ -306,16 +316,71 @@ class TaskManager:
         db.update_task(task_id, status='paused')
 
     async def resume_task(self, task_id: str):
+        task = db.get_task(task_id)
+        if not task: return
+        
+        phase = task.get('phase', 'init')
+        interaction_phases = [
+            'init', 
+            'awaiting_speaker_validation', 
+            'awaiting_transcription_review', 
+            'awaiting_translation_review', 
+            'awaiting_audio_validation', 
+            'complete'
+        ]
+        
+        if phase in interaction_phases:
+            # It's waiting for user input, simply update status, don't restart pipeline
+            new_status = 'completed' if phase == 'complete' else 'awaiting_validation'
+            db.update_task(task_id, status=new_status, was_running_at_shutdown=0)
+            
+            # Broadcast state sync to wake up UI
+            from .state import broadcast_to_task
+            await broadcast_to_task(task_id, {'type': 'state_sync', 'data': db.get_task(task_id)})
+            return
+            
         db.update_task(task_id, status='queued', was_running_at_shutdown=1)
         await self.start_task(task_id, is_resume=True)
 
     async def restart_task(self, task_id: str, from_phase: Optional[str] = None):
+        """Stop current task and jump to a specific phase."""
+        # 1. Kill any active worker first
         await self.cancel_task(task_id)
-        await asyncio.sleep(0.5)
+        # Short delay to allow OS/Thread handles to release
+        await asyncio.sleep(0.3)
         
         new_phase = from_phase or 'init'
-        db.update_task(task_id, phase=new_phase, status='queued', progress=0)
-        await self.start_task(task_id)
+        
+        # 2. Determine if target is an interaction step or computation step
+        interaction_phases = [
+            'init', 
+            'awaiting_speaker_validation', 
+            'awaiting_transcription_review', 
+            'awaiting_translation_review', 
+            'awaiting_audio_validation', 
+            'complete'
+        ]
+        
+        new_status = 'awaiting_validation' if new_phase in interaction_phases else 'queued'
+        
+        # 3. Reset progress and update state
+        db.update_task(
+            task_id, 
+            phase=new_phase, 
+            status=new_status, 
+            progress=0, 
+            was_running_at_shutdown=0,
+            message=f"Jumped to {new_phase}"
+        )
+        
+        # 4. If target is computation, start the worker
+        if new_status == 'queued':
+            await self.start_task(task_id)
+        else:
+            # Broadcast state sync so UI updates immediately
+            from .state import broadcast_to_task
+            task_data = db.get_task(task_id)
+            await broadcast_to_task(task_id, {'type': 'state_sync', 'data': task_data})
 
     async def recover_interrupted_tasks(self):
         tasks = db.get_interrupted_tasks()

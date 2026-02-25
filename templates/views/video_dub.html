@@ -9,142 +9,16 @@
         </button>
     </header>
 
-    <div id="dubbing-wizard" class="wizard-container">
+    <div id="dubbing-wizard" class="wizard-container stacked-view">
         
-        <!-- STATE 1: CONFIGURATION & UPLOAD -->
-        <div id="state-upload" class="wizard-step active">
-            <div class="card centered-card">
-                <h3><i class="fas fa-magic"></i> Start New Project</h3>
-                
-                <!-- YouTube Section -->
-                <div class="youtube-section" style="margin-bottom: 25px; border-bottom: 1px solid var(--border); padding-bottom: 20px;">
-                    <label style="display:block; text-align:left; margin-bottom:8px; font-weight:500;">
-                        <i class="fab fa-youtube"></i> Import from YouTube
-                    </label>
-                    <div class="input-group">
-                        <input type="text" id="youtube-url" class="youtube-input" placeholder="Paste YouTube URL here...">
-                        <button type="button" id="download-youtube-btn" class="btn-secondary">
-                            <i class="fas fa-cloud-download-alt"></i> Fetch
-                        </button>
-                    </div>
-                    <div id="youtube-status" class="status-detail" style="margin-top:8px; display:none;"></div>
-                </div>
+        <!-- DYNAMIC STAGE HEADER (FUN UI) -->
+        <div id="dynamic-stage-header" style="margin-bottom: 10px; display: flex; justify-content: flex-end;"></div>
 
-                <form id="upload-form">
-                    <!-- File Upload Section -->
-                    <div class="drop-zone" id="drop-zone" onclick="document.getElementById('video-input').click()">
-                        <i class="fas fa-file-upload fa-3x"></i>
-                        <p id="file-display-text">Click to browse or drag video file here</p>
-                        <input type="file" id="video-input" name="file" accept="video/*" hidden>
-                    </div>
-
-                    <!-- Project Configuration -->
-                    <div class="project-options" style="margin-top: 25px; text-align: left; background: var(--bg-main); padding: 20px; border-radius: 8px; border: 1px solid var(--border);">
-                        <h4 style="margin-bottom: 15px; color: var(--accent);"><i class="fas fa-sliders-h"></i> Project Settings</h4>
-                        
-                        <div class="options-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
-                            <!-- Whisper Model -->
-                            <div class="option-group">
-                                <label><i class="fas fa-brain"></i> AI Model</label>
-                                <select name="whisper_model" id="trans-whisper-model" class="input-select">
-                                    <option value="tiny">Tiny (Fastest)</option>
-                                    <option value="base">Base</option>
-                                    <option value="small">Small</option>
-                                    <option value="medium">Medium</option>
-                                    <option value="large-v2" selected>Large v2 (Balanced)</option>
-                                    <option value="large-v3">Large v3 (Best)</option>
-                                </select>
-                            </div>
-
-                            <!-- Source Language -->
-                            <div class="option-group">
-                                <label>Source Language</label>
-                                <select name="src_lang" id="src-lang" class="input-select">
-                                    <option value="auto" selected>✨ Auto Detect</option>
-                                    <option value="en">🇺🇸 English</option>
-                                    <option value="es">🇪🇸 Spanish</option>
-                                    <option value="fr">🇫🇷 French</option>
-                                    <option value="de">🇩🇪 German</option>
-                                    <option value="it">🇮🇹 Italian</option>
-                                    <option value="ja">🇯🇵 Japanese</option>
-                                    <option value="zh">🇨🇳 Chinese</option>
-                                    <option value="ru">🇷🇺 Russian</option>
-                                    <option value="pt">🇵🇹 Portuguese</option>
-                                </select>
-                            </div>
-
-                            <!-- Target Language -->
-                            <div class="option-group">
-                                <label>Target Language</label>
-                                <select name="tgt_lang" id="tgt-lang" class="input-select">
-                                    <option value="en" selected>🇺🇸 English</option>
-                                    <option value="es">🇪🇸 Spanish</option>
-                                    <option value="fr">🇫🇷 French</option>
-                                    <option value="de">🇩🇪 German</option>
-                                    <option value="it">🇮🇹 Italian</option>
-                                    <option value="ja">🇯🇵 Japanese</option>
-                                    <option value="zh">🇨🇳 Chinese</option>
-                                    <option value="ru">🇷🇺 Russian</option>
-                                    <option value="pt">🇵🇹 Portuguese</option>
-                                </select>
-                            </div>
-
-                            <!-- Whisper Model -->
-                            <div class="option-group">
-                                <label>AI Model (Accuracy vs Speed)</label>
-                                <select name="whisper_model" id="whisper-model" class="input-select">
-                                    <option value="tiny">Tiny (Fastest)</option>
-                                    <option value="base">Base</option>
-                                    <option value="small">Small</option>
-                                    <option value="medium">Medium</option>
-                                    <option value="large-v2" selected>Large v2 (Balanced)</option>
-                                    <option value="large-v3">Large v3 (Best)</option>
-                                </select>
-                            </div>
-
-                            <!-- TTS Engine -->
-                            <div class="option-group">
-                                <label>Voice Engine</label>
-                                <select name="tts_engine" id="tts-engine" class="input-select">
-                                    <option value="f5" selected>F5-TTS (High Quality)</option>
-                                    <option value="fishspeech">FishSpeech</option>
-                                    <option value="lollms">LoLLMs TTS</option>
-                                </select>
-                            </div>
-
-                            <!-- VAD Sensitivity -->
-                            <div class="option-group" style="grid-column: span 2;">
-                                <label style="flex-direction:row; justify-content:space-between;">
-                                    <span><i class="fas fa-ear-listen"></i> Speech Detection Sensitivity</span>
-                                    <span id="vad-val">High (0.20)</span>
-                                </label>
-                                <input type="range" name="vad_threshold" min="0.05" max="0.6" step="0.05" value="0.20" 
-                                    oninput="document.getElementById('vad-val').innerText = (this.value <= 0.2 ? 'Very High' : this.value <= 0.35 ? 'Standard' : 'Strict') + ' ('+this.value+')'">
-                                <p class="help-text">Lower values detect quiet/distant voices. Higher values ignore background noise.</p>
-                            </div>
-
-                            <!-- Audio Separation -->
-                            <div class="option-group" style="display: flex; align-items: center; padding-top: 25px;">
-                                <label style="cursor: pointer; display: flex; align-items: center; gap: 10px;">
-                                    <input type="checkbox" id="separate-audio" name="separate_audio"> 
-                                    <span><i class="fas fa-layer-group"></i> Separate Background (Demucs)</span>
-                                </label>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <button type="submit" id="start-btn" class="btn-primary full-width" style="margin-top: 25px; padding: 12px; font-size: 1.1rem;" disabled>
-                        <i class="fas fa-rocket"></i> Start Processing
-                    </button>
-                </form>
-            </div>
-        </div>
-
-        <!-- SHARED TIMELINE HEADER -->
-        <div id="task-timeline-header" class="hidden" style="margin-bottom: 20px;">
+        <!-- PERMANENT TIMELINE (Hidden only during initial landing/upload) -->
+        <div id="task-timeline-header" class="hidden">
             <div class="status-card" style="margin-bottom: 20px;">
                 <div class="status-header">
-                    <h3><i class="fas fa-tasks"></i> Workflow Progress</h3>
+                    <h3><i class="fas fa-tasks"></i> Project Timeline</h3>
                     <span id="processing-percent" class="percent-badge">0%</span>
                 </div>
                 <div class="progress-track">
@@ -153,12 +27,133 @@
                 <div id="processing-status-text" class="status-detail">Initializing...</div>
             </div>
 
-            <div class="task-list-card card" style="width: 100%; margin-bottom: 20px; max-height: 350px; overflow-y: auto;">
-                <h4 style="margin-bottom:15px;"><i class="fas fa-link"></i> Execution Chain</h4>
-                <!-- Container for the visual chain -->
+            <div class="task-list-card card" style="width: 100%; margin-bottom: 20px;">
+                <h4 style="margin-bottom:15px;"><i class="fas fa-link"></i> Execution Chain (Click a step to view its UI)</h4>
                 <div id="granular-task-list" class="task-chain-container">
                     <div class="empty-state">Waiting for workflow...</div>
                 </div>
+            </div>
+        </div>
+
+        <!-- DYNAMIC CONTENT AREA -->
+        <div id="stage-content-area">
+            <!-- STATE 1: CONFIGURATION & UPLOAD -->
+            <div id="state-upload" class="wizard-step active">
+                <div class="card">
+                
+                <div id="media-selection-section">
+                    <h3><i class="fas fa-magic"></i> Start New Project</h3>
+                    
+                    <!-- YouTube Section -->
+                    <div class="youtube-section" style="margin-bottom: 25px; border-bottom: 1px solid var(--border); padding-bottom: 20px;">
+                        <label style="display:block; text-align:left; margin-bottom:8px; font-weight:500;">
+                            <i class="fab fa-youtube"></i> Import from YouTube
+                        </label>
+                        <div class="input-group">
+                            <input type="text" id="youtube-url" class="youtube-input" placeholder="Paste YouTube URL here...">
+                            <button type="button" id="download-youtube-btn" class="btn-secondary">
+                                <i class="fas fa-cloud-download-alt"></i> Fetch
+                            </button>
+                        </div>
+                        <div id="youtube-status" class="status-detail" style="margin-top:8px; display:none;"></div>
+                    </div>
+
+                    <form id="upload-form">
+                        <!-- Local File Upload -->
+                        <div id="dub-upload-section">
+                            <div class="drop-zone" id="drop-zone" onclick="document.getElementById('video-input').click()">
+                                <i class="fas fa-file-upload fa-3x"></i>
+                                <p id="file-display-text">Click to browse or drag video file here</p>
+                                <input type="file" id="video-input" name="file" accept="video/*" hidden>
+                            </div>
+                            <p class="help-text" style="text-align:center; margin-bottom: 20px;">The file will be uploaded first, then you can configure settings.</p>
+                            <button type="button" id="upload-only-btn" class="btn-primary full-width" disabled>
+                                <i class="fas fa-upload"></i> Upload & Continue
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <form id="config-form">
+                    <!-- STEP 2: CONFIGURE (Hidden until upload done) -->
+                    <div id="dub-config-section" class="hidden">
+                        <div class="project-options" style="margin-top: 0; text-align: left; background: var(--bg-main); padding: 20px; border-radius: 8px; border: 1px solid var(--border);">
+                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:15px;">
+                                <h4 style="margin:0; color: var(--accent);"><i class="fas fa-sliders-h"></i> Project Setup</h4>
+                                <span id="config-filename" class="status-detail"></span>
+                            </div>
+                            
+                            <div class="options-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                                <div class="option-group">
+                                    <label>Source Language</label>
+                                    <select name="src_lang" id="src-lang" class="input-select">
+                                        <option value="auto" selected>✨ Auto Detect</option>
+                                        <option value="en">🇺🇸 English</option>
+                                        <option value="es">🇪🇸 Spanish</option>
+                                        <option value="fr">🇫🇷 French</option>
+                                        <option value="de">🇩🇪 German</option>
+                                        <option value="it">🇮🇹 Italian</option>
+                                        <option value="ja">🇯🇵 Japanese</option>
+                                        <option value="zh">🇨🇳 Chinese</option>
+                                    </select>
+                                </div>
+
+                                <div class="option-group">
+                                    <label>Target Language</label>
+                                    <select name="tgt_lang" id="tgt-lang" class="input-select">
+                                        <option value="en" selected>🇺🇸 English</option>
+                                        <option value="es">🇪🇸 Spanish</option>
+                                        <option value="fr">🇫🇷 French</option>
+                                        <option value="de">🇩🇪 German</option>
+                                        <option value="it">🇮🇹 Italian</option>
+                                        <option value="ja">🇯🇵 Japanese</option>
+                                        <option value="zh">🇨🇳 Chinese</option>
+                                    </select>
+                                </div>
+
+                                <div class="option-group">
+                                    <label>AI Model</label>
+                                    <select name="whisper_model" id="whisper-model" class="input-select">
+                                        <option value="base">Base (Fast)</option>
+                                        <option value="small">Small</option>
+                                        <option value="medium">Medium</option>
+                                        <option value="large-v2" selected>Large v2 (Recommended)</option>
+                                        <option value="large-v3">Large v3 (Best)</option>
+                                    </select>
+                                </div>
+
+                                <div class="option-group">
+                                    <label>Voice Engine</label>
+                                    <select name="tts_engine" id="tts-engine" class="input-select">
+                                        <option value="f5" selected>F5-TTS (High Quality)</option>
+                                        <option value="fishspeech">FishSpeech</option>
+                                        <option value="lollms">LoLLMs TTS</option>
+                                    </select>
+                                </div>
+
+                                <div class="option-group" style="grid-column: span 2;">
+                                    <label style="flex-direction:row; justify-content:space-between;">
+                                        <span><i class="fas fa-ear-listen"></i> Speech Detection Sensitivity</span>
+                                        <span id="vad-val" class="percent-badge">Standard (0.25)</span>
+                                    </label>
+                                    <input type="range" name="vad_threshold" min="0.05" max="0.6" step="0.05" value="0.25" 
+                                        oninput="document.getElementById('vad-val').innerText = (this.value <= 0.2 ? 'Very High' : this.value <= 0.35 ? 'Standard' : 'Strict') + ' ('+this.value+')'">
+                                </div>
+
+                                <div class="option-group" style="grid-column: span 2;">
+                                    <label class="checkbox-label">
+                                        <input type="checkbox" id="separate-audio" name="separate_audio"> 
+                                        <span><i class="fas fa-layer-group"></i> Separate Background Music (Demucs)</span>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <button type="submit" id="start-btn" class="btn-primary full-width" style="margin-top: 20px; padding: 12px; font-size: 1.1rem;">
+                            <i class="fas fa-rocket"></i> Start Dubbing
+                        </button>
+                    </div>
+                </form>
             </div>
         </div>
 

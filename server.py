@@ -14,6 +14,7 @@ from pathlib import Path
 import signal
 import sys
 import argparse
+from ascii_colors import ASCIIColors
 
 # CRITICAL FIX: Set environment variables BEFORE any torch/PyTorch imports
 # This prevents LLVM errors with Intel MKL/SVML on Windows
@@ -21,7 +22,11 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-
+# CRITICAL: Disable Numba/LLVM SVML (Fixes transcription crash)
+os.environ["NUMBA_DISABLE_INTEL_SVML"] = "1"
+os.environ["NUMBA_CPU_NAME"] = "generic" # Prevent specific AVX optimizations
+os.environ["MKL_CBWR"] = "COMPATIBLE" 
+os.environ["MKL_DEBUG_CPU_TYPE"] = "5"
 # NEW: Disable Intel SVML to prevent LLVM errors on Windows
 os.environ["MKL_ENABLE_INSTRUCTIONS"] = "SSE4_2"  # Disable AVX/AVX2/SVML
 os.environ["NPY_DISABLE_CPU_FEATURES"] = "AVX512F,AVX2,AVX"  # Disable NumPy AVX too
@@ -108,9 +113,7 @@ async def lifespan(app: FastAPI):
     This is the modern replacement for on_event("startup")/("shutdown").
     """
     # STARTUP
-    print("=" * 50)
-    print("VoiceDub Pro - Starting up...")
-    print("=" * 50)
+    ASCIIColors.panel("VoiceDub Pro - Starting up...")
     
     # Auto-recovery disabled - tasks must be manually resumed from dashboard
     # To re-enable auto-recovery, uncomment the following block:

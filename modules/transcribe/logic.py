@@ -2,6 +2,12 @@
 Enhanced transcription logic with optional speaker diarization.
 """
 
+import os
+
+# REINFORCE SVML FIX (Must be before librosa/numba imports)
+os.environ["NUMBA_DISABLE_INTEL_SVML"] = "1"
+os.environ["NUMBA_CPU_NAME"] = "generic"
+
 import torch
 import json
 import soundfile as sf
@@ -274,12 +280,17 @@ async def run_transcription_stage_2(
     # Filter segments and update speaker IDs
     final_segments = []
     for seg in segments:
-        sid = seg.speaker_id
+        sid = str(seg.speaker_id)
+        # Check original speaker action/include flag
+        info = speaker_config.get(sid, {})
+        if info.get('action') == 'remove' or info.get('include') is False:
+            continue
+            
         # Apply merge
-        effective_id = merge_map.get(sid, sid)
-        # Check if master or effective speaker is 'remove'
-        action = speaker_config.get(str(effective_id), {}).get('action', 'dub')
-        if action == 'remove' or not speaker_config.get(str(sid), {}).get('include', True):
+        effective_id = merge_map.get(int(sid), int(sid))
+        
+        # Check if the master speaker of a merge is also removed
+        if speaker_config.get(str(effective_id), {}).get('action') == 'remove':
             continue
             
         seg.speaker_id = effective_id
@@ -333,31 +344,37 @@ async def run_transcription_stage_2(
     return result
 
 
-async def translate_text(text: str, target_lang: str) -> str:
-    """Translate text using LoLLMs."""
-    try:
-        lc = manager.get_lollms_client()
-        if not lc:
-            return None
-        
-        lang_names = {
-            'en': 'English', 'es': 'Spanish', 'fr': 'French', 'de': 'German',
-            'it': 'Italian', 'pt': 'Portuguese', 'zh': 'Chinese',
-            'ja': 'Japanese', 'ko': 'Korean', 'ar': 'Arabic', 'ru': 'Russian'
-        }
-        
-        lang_name = lang_names.get(target_lang, target_lang)
-        
-        prompt = f"""Translate the following text to {lang_name}. 
+async def translate_text(text: str, target_lang: str, max_retries: int = 3) -> str:
+    """Translate text using LoLLMs with retry logic."""
+    for attempt in range(max_retries):
+        try:
+            lc = manager.get_lollms_client()
+            if not lc:
+                return None
+            
+            lang_names = {
+                'en': 'English', 'es': 'Spanish', 'fr': 'French', 'de': 'German',
+                'it': 'Italian', 'pt': 'Portuguese', 'zh': 'Chinese',
+                'ja': 'Japanese', 'ko': 'Korean', 'ar': 'Arabic', 'ru': 'Russian'
+            }
+            
+            lang_name = lang_names.get(target_lang, target_lang)
+            
+            prompt = f"""Translate the following text to {lang_name}. 
 Preserve the meaning, tone, and style. Only output the translation, no explanations.
 
 Text: {text}
 
 Translation to {lang_name}:"""
-        
-        result = lc.generate_text(prompt, temperature=0.3)
-        return result.strip()
-        
-    except Exception as e:
-        print(f"Translation failed: {e}")
-        return None
+            
+            result = lc.generate_text(prompt, temperature=0.3)
+            return result.strip()
+            
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 2
+                print(f"Translation attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
+                await asyncio.sleep(wait_time)
+            else:
+                print(f"Translation failed after {max_retries} attempts: {e}")
+                return None

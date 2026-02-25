@@ -62,6 +62,7 @@ class YouTubeUploadRequest(BaseModel):
     src_lang: str = "auto"
     separate_audio: bool = False
     tts_engine: str = "f5"
+    auto_start: bool = True
 
 class ResumeRequest(BaseModel):
     task_id: str
@@ -188,11 +189,10 @@ async def upload_youtube_video(
         
         db.create_task(task_id, request.filename, str(file_path))
         
-        # CRITICAL FIX: Ensure we use the provided tgt_lang, never default to 'en'
         tgt_lang = request.tgt_lang if request.tgt_lang and request.tgt_lang.strip() else "en"
         src_lang = request.src_lang if request.src_lang and request.src_lang.strip() else "auto"
         
-        print(f"CRITICAL: YouTube upload - src_lang={src_lang}, tgt_lang={tgt_lang}, tts_engine={request.tts_engine}")
+        status = 'queued' if request.auto_start else 'awaiting_input'
         
         db.update_task(
             task_id,
@@ -200,7 +200,7 @@ async def upload_youtube_video(
             src_lang=src_lang,
             separate_audio=request.separate_audio,
             tts_engine=request.tts_engine,
-            status='queued',
+            status=status,
             phase='init',
             source='youtube',
             video_path=str(file_path),
@@ -210,16 +210,13 @@ async def upload_youtube_video(
             resume_attempts=0
         )
         
-        # Verify the task was saved correctly
-        saved_task = db.get_task(task_id)
-        print(f"CRITICAL: Verified saved task - tgt_lang={saved_task.get('tgt_lang')}, src_lang={saved_task.get('src_lang')}")
-        
-        background_tasks.add_task(task_manager.start_task, task_id)
+        if request.auto_start:
+            background_tasks.add_task(task_manager.start_task, task_id)
         
         return {
             "task_id": task_id,
-            "status": "queued",
-            "message": "YouTube video uploaded, starting speaker identification..."
+            "status": status,
+            "message": "YouTube video ready for configuration."
         }
         
     except HTTPException:
@@ -295,7 +292,7 @@ async def restart_task_endpoint(
         
         from_phase = request.from_phase if request else None
         
-        valid_phases = ['init', 'identifying', 'translating', 'recomposing']
+        valid_phases = ['init', 'identifying', 'transcribing', 'translating', 'synthesizing', 'recomposing']
         if from_phase and from_phase not in valid_phases:
             raise HTTPException(400, f"Invalid phase '{from_phase}'. Must be one of: {valid_phases}")
         
@@ -414,6 +411,10 @@ async def handle_speaker_validation(task_id: str, config: Dict[str, Any]):
     Step 1: Speakers validated -> Start Transcription.
     """
     try:
+        # Stop any running task first to avoid collisions
+        await task_manager.cancel_task(task_id)
+        await asyncio.sleep(0.2)
+        
         # Merge speaker config
         existing_task = db.get_task(task_id)
         existing_config = existing_task.get('speaker_config', {}) if existing_task else {}
@@ -444,6 +445,9 @@ async def handle_transcription_validation(task_id: str, segments: List[Dict]):
     Step 2: Transcription validated -> Start Translation.
     """
     try:
+        await task_manager.cancel_task(task_id)
+        await asyncio.sleep(0.2)
+        
         db.update_task(task_id, 
             segments=segments,
             phase='translating', 
@@ -483,6 +487,9 @@ async def handle_audio_validation(task_id: str):
     Step 4: Audio validated -> Start Final Assembly.
     """
     try:
+        await task_manager.cancel_task(task_id)
+        await asyncio.sleep(0.2)
+        
         db.update_task(task_id, 
             phase='recomposing', 
             status='queued',
@@ -499,6 +506,9 @@ async def handle_translation_validation(task_id: str, config: Any):
     Handle translation review and confirmation.
     """
     try:
+        await task_manager.cancel_task(task_id)
+        await asyncio.sleep(0.2)
+        
         # Robust extraction: handle if config is a list or a dict
         if isinstance(config, list):
             edited_segments = config
@@ -582,14 +592,13 @@ async def upload_video(
     tgt_lang: str = Form("en"),
     src_lang: str = Form("auto"),
     separate_audio: str = Form("false"),
-    tts_engine: str = Form("f5")
+    tts_engine: str = Form("f5"),
+    auto_start: bool = Form(True)
 ):
     try:
         task_id = str(uuid.uuid4())
-        
         separate_audio_bool = separate_audio.lower() in ('true', '1', 'yes', 'on')
         
-        # CRITICAL FIX: Ensure we never accept None or empty tgt_lang
         if not tgt_lang or tgt_lang.strip() == "":
             tgt_lang = "en"
         
@@ -622,9 +631,12 @@ async def upload_video(
         
         # Verify the task was saved correctly
         saved_task = db.get_task(task_id)
-        print(f"CRITICAL: Verified saved task after regular upload - tgt_lang={saved_task.get('tgt_lang')}, target_language={saved_task.get('target_language')}, src_lang={saved_task.get('src_lang')}")
         
-        background_tasks.add_task(task_manager.start_task, task_id)
+        if auto_start:
+            background_tasks.add_task(task_manager.start_task, task_id)
+        else:
+            # Set to a special state so UI knows it's waiting for config
+            db.update_task(task_id, status='awaiting_input', phase='init')
         
         return {
             "task_id": task_id,
@@ -764,20 +776,35 @@ async def get_speaker_sample(task_id: str, speaker_id: int):
         raise HTTPException(500, f"Failed to get speaker sample: {str(e)}\n\nFull traceback in server logs")
 
 @router.post("/api/projects/{task_id}/validate-speakers")
-async def validate_speakers_api(task_id: str, update: SpeakerConfigUpdate):
-    """Step 1: Validate speakers, trigger transcription."""
+async def validate_speakers_api(task_id: str, request: Request):
+    """Step 1: Validate speakers, trigger transcription or just save."""
+    body = await request.json()
+    speakers = body.get('speakers', {})
+    save_only = body.get('save_only', False)
+    
     task = db.get_task(task_id)
     if not task:
         raise HTTPException(404, f"Project {task_id} not found in database")
+    
+    if save_only:
+        db.update_task(task_id, speaker_config=speakers)
+        return {"status": "saved"}
         
-    await handle_speaker_validation(task_id, update.speakers)
+    await handle_speaker_validation(task_id, speakers)
     return {"status": "accepted", "next_phase": "transcribing"}
 
 @router.post("/api/projects/{task_id}/validate-transcription")
 async def validate_transcription_api(task_id: str, request: Request):
-    """Step 2: Validate text, trigger translation."""
+    """Step 2: Validate text, trigger translation or just save."""
     body = await request.json()
     segments = body.get('segments', [])
+    save_only = body.get('save_only', bool(body.get('save_only')))
+    
+    if save_only:
+        # Crucial: Update both generic segments and transcribed_segments to sync state
+        db.update_task(task_id, segments=segments, transcribed_segments=segments)
+        return {"status": "saved"}
+        
     await handle_transcription_validation(task_id, segments)
     return {"status": "accepted", "next_phase": "translating"}
 
@@ -786,6 +813,12 @@ async def validate_translation_api(task_id: str, request: Request):
     """Step 3: Validate translation, trigger TTS."""
     body = await request.json()
     segments = body.get('segments', [])
+    save_only = body.get('save_only', False)
+
+    if save_only:
+        db.update_task(task_id, segments=segments, translation_segments=segments)
+        return {"status": "saved"}
+
     await handle_translation_validation(task_id, segments)
     return {"status": "accepted", "next_phase": "synthesizing"}
 
@@ -841,10 +874,16 @@ async def preview_segment_audio(task_id: str, segment_idx: int):
         if not task: raise HTTPException(404, "Task not found")
         
         all_segs = task.get('segments', []) or task.get('transcribed_segments', [])
-        if segment_idx >= len(all_segs):
-            raise HTTPException(404, f"Segment {segment_idx} not found")
-            
-        seg = all_segs[segment_idx]
+        
+        # CRITICAL FIX: Find segment by its original 'idx' property to handle removed speakers correctly
+        seg = next((s for s in all_segs if s.get('idx') == segment_idx), None)
+        
+        # Fallback to array index if idx is missing
+        if not seg:
+            if segment_idx < len(all_segs):
+                seg = all_segs[segment_idx]
+            else:
+                raise HTTPException(404, f"Segment {segment_idx} not found")
 
         # Priority 1: Check if synthesized TTS audio exists
         if seg.get('audio_path'):

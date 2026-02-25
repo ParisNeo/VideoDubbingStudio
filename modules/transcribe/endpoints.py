@@ -1,6 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, Form, BackgroundTasks, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from .logic import process_transcription, run_transcription_stage_1, run_transcription_stage_2
+from ..translate_video.state import connect_task_websocket, disconnect_task_websocket, broadcast_to_task
 import shutil
 import uuid
 import traceback
@@ -28,13 +29,18 @@ async def upload_for_transcription(
     tgt_lang: Optional[str] = Form(None),
     use_diarization: str = Form("false"),
     whisper_model: str = Form("large-v2"),
-    vad_threshold: float = Form(0.20)
+    vad_threshold: float = Form(0.20),
+    auto_start: str = Form("true") # New parameter
 ):
     try:
         task_id = str(uuid.uuid4())
         do_diarization = use_diarization.lower() in ('true', '1', 'yes', 'on')
+        should_start = auto_start.lower() == 'true'
         
-        file_path = UPLOAD_DIR / f"{task_id}_{file.filename}"
+        original_filename = file.filename or "audio.wav"
+        safe_filename = f"{task_id}_{original_filename}"
+        file_path = UPLOAD_DIR / safe_filename
+        
         with open(file_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
         
@@ -47,26 +53,25 @@ async def upload_for_transcription(
             tgt_lang=tgt_lang or "",
             whisper_model=whisper_model,
             vad_threshold=vad_threshold,
-            status='queued',
+            status='queued' if should_start else 'awaiting_input',
             phase='identifying' if do_diarization else 'transcribing'
         )
 
-        # 2. CRITICAL: Initialize task in active_tasks memory for WebSocket sync
+        # 2. Initialize in memory
         active_tasks[task_id] = {
             "task_id": task_id,
             "file_path": str(file_path),
-            "src_lang": src_lang,
-            "tgt_lang": tgt_lang,
-            "status": "queued",
+            "status": "queued" if should_start else "awaiting_input",
             "progress": 0,
             "speakers_confirmed": False
         }
         
-        # 3. Start background worker
-        if do_diarization:
-            background_tasks.add_task(process_with_diarization_task, task_id)
-        else:
-            background_tasks.add_task(process_simple_task, task_id)
+        # 3. Start worker ONLY if requested
+        if should_start:
+            if do_diarization:
+                background_tasks.add_task(process_with_diarization_task, task_id)
+            else:
+                background_tasks.add_task(process_simple_task, task_id)
         
         return {
             "task_id": task_id,
@@ -94,10 +99,16 @@ async def preview_transcription_segment(task_id: str, segment_idx: int):
         
     segments = task.get("segments", [])
     
-    if not segments or segment_idx >= len(segments):
-        raise HTTPException(404, "Segment not found")
-        
-    seg = segments[segment_idx]
+    # CRITICAL FIX: Find segment by its original 'idx' property
+    seg = next((s for s in segments if s.get('idx') == segment_idx), None)
+    
+    # Fallback to array index
+    if not seg:
+        if segment_idx < len(segments):
+            seg = segments[segment_idx]
+        else:
+            raise HTTPException(404, "Segment not found")
+            
     start, duration = seg["start"], seg["end"] - seg["start"]
     
     # Use FFmpeg to extract the segment to a buffer
@@ -135,27 +146,7 @@ async def get_transcription_status(task_id: str):
 async def transcription_websocket(websocket: WebSocket, task_id: str):
     """WebSocket for real-time transcription updates with diarization."""
     await websocket.accept()
-    
-    # Try to recover task from database if not in memory (e.g. page refresh)
-    if task_id not in active_tasks:
-        db_task = db.get_task(task_id)
-        if db_task and db_task.get('source') == 'transcribe':
-            active_tasks[task_id] = {
-                "task_id": task_id,
-                "file_path": db_task.get('file_path'),
-                "src_lang": db_task.get('src_lang'),
-                "tgt_lang": db_task.get('tgt_lang'),
-                "status": db_task.get('status'),
-                "progress": db_task.get('progress', 0),
-                "speakers_confirmed": False
-            }
-        else:
-            await websocket.send_json({"type": "error", "message": "Task not found"})
-            await websocket.close()
-            return
-    
-    task = active_tasks[task_id]
-    task["websocket"] = websocket
+    await connect_task_websocket(task_id, websocket)
     
     try:
         while True:
@@ -163,17 +154,20 @@ async def transcription_websocket(websocket: WebSocket, task_id: str):
             msg_type = data.get("type")
             
             if msg_type == "confirm_speakers":
-                # User confirmed speaker config
-                task["speaker_config"] = data.get("speakers", {})
-                task["speakers_confirmed"] = True
+                # User confirmed speaker config - update task memory and DB
+                if task_id in active_tasks:
+                    active_tasks[task_id]["speaker_config"] = data.get("speakers", {})
+                    active_tasks[task_id]["speakers_confirmed"] = True
+                
+                # Delegate to the shared validation handler (which restarts the task)
+                from ..translate_video.endpoints import handle_speaker_validation
+                await handle_speaker_validation(task_id, data.get('speakers', {}))
                 
     except WebSocketDisconnect:
-        print(f"Transcription WebSocket disconnected for {task_id}")
+        await disconnect_task_websocket(task_id, websocket)
     except Exception as e:
         print(f"Transcription WebSocket error: {e}")
-    finally:
-        if task_id in active_tasks:
-            active_tasks[task_id].pop("websocket", None)
+        await disconnect_task_websocket(task_id, websocket)
 
 async def process_simple_task(task_id: str):
     """Simple transcription without diarization."""
@@ -212,6 +206,9 @@ async def process_with_diarization_task(task_id: str):
     task = active_tasks.get(task_id)
     if not task: return
     
+    # Define ws at top level so except block can access it
+    ws = task.get("websocket")
+    
     async def send_progress(percent, message):
         task["progress"] = percent
         task["message"] = message
@@ -236,6 +233,7 @@ async def process_with_diarization_task(task_id: str):
         task["interim_data"] = interim
 
         # WAIT FOR UI CONFIRMATION
+        # Refresh ws reference in case of reconnect
         ws = task.get("websocket")
         if ws:
             await ws.send_json({

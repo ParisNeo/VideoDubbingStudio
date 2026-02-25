@@ -40,3 +40,20 @@ export function init() {
         }
     });
 }
+
+/**
+ * Resets the analysis UI for a fresh session
+ */
+export function startNewProject() {
+    const form = document.getElementById('analysis-form');
+    if (form) form.reset();
+    
+    const output = document.getElementById('analysis-output');
+    const content = document.getElementById('analysis-content');
+    if (output) output.style.display = 'none';
+    if (content) content.innerHTML = '';
+}
+
+export function onShow() {
+    // Logic to run when analysis view is shown
+}

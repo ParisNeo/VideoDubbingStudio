@@ -1395,18 +1395,138 @@ header h1 i {
     z-index: 1;
     border-radius: 6px;
     transition: all 0.2s;
-    cursor: pointer; /* Nodes are now clickable */
+    cursor: pointer;
 }
 
-.task-node:hover {
+.task-node.interaction-node {
+    border-left: 2px solid transparent;
+}
+
+.task-node.interaction-node:hover {
+    background-color: rgba(88, 166, 255, 0.05);
+    border-left: 2px solid var(--accent);
+    transform: translateX(4px);
+}
+
+.task-node.compute-node:hover {
     background-color: var(--bg-hover);
     transform: translateX(4px);
-    border-right: 2px solid var(--accent);
 }
 
 .task-node.active-step {
-    background-color: rgba(88, 166, 255, 0.1);
-    border-right: 3px solid var(--accent);
+    background-color: rgba(88, 166, 255, 0.15) !important;
+    border-left: 4px solid var(--accent);
+    box-shadow: inset 0 0 15px rgba(88, 166, 255, 0.05);
+}
+
+/* User focus indicator - distinct from AI focus */
+.task-node.user-viewing {
+    outline: 1px solid var(--accent);
+    outline-offset: -1px;
+    background-color: rgba(88, 166, 255, 0.2) !important;
+    border-left: 4px solid var(--accent);
+}
+
+/* Transition effect for switching steps */
+.wizard-step.active {
+    display: block;
+    animation: content-appear 0.3s ease-out;
+}
+
+@keyframes content-appear {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* Fun Animations */
+@keyframes glow-pulse {
+    0% { box-shadow: 0 0 5px rgba(88, 166, 255, 0.2); border-color: var(--border); }
+    50% { box-shadow: 0 0 20px rgba(88, 166, 255, 0.4); border-color: var(--accent); }
+    100% { box-shadow: 0 0 5px rgba(88, 166, 255, 0.2); border-color: var(--border); }
+}
+
+.task-node.running .node-icon-wrapper {
+    animation: glow-pulse 2s infinite ease-in-out;
+}
+
+.stage-badge {
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.stage-badge.thinking {
+    background: rgba(88, 166, 255, 0.1);
+    color: var(--accent);
+    border: 1px solid var(--accent);
+}
+
+.stage-badge.waiting {
+    background: rgba(210, 153, 34, 0.1);
+    color: var(--warning);
+    border: 1px solid var(--warning);
+}
+
+.stage-header-main {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 15px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+/* Chronological Segment Layout */
+.chronological-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    transition: border-color 0.2s;
+}
+
+.chronological-card:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
+}
+
+.chronological-card .seg-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+.chronological-card .spk-name {
+    font-weight: 600;
+    color: var(--accent);
+    flex: 1;
+}
+
+.chronological-card .seg-time {
+    font-family: var(--font-code);
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    background: var(--bg-panel);
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.avatar.sm {
+    width: 24px;
+    height: 24px;
+    font-size: 0.75rem;
 }
 
 .task-node:hover .restart-btn {
@@ -1430,6 +1550,16 @@ header h1 i {
 .node-icon {
     font-size: 10px;
     color: var(--text-muted);
+}
+
+.task-node[onclick] {
+    cursor: pointer;
+}
+
+.task-node .node-title {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
 }
 
 .task-node.running .node-icon-wrapper {

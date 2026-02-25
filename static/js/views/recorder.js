@@ -45,6 +45,32 @@ export function init() {
     });
 }
 
+/**
+ * Resets the recorder UI for a fresh session
+ */
+export function startNewProject() {
+    stopTimer();
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+    }
+    
+    audioChunks = [];
+    const display = document.getElementById('timer-display');
+    if (display) display.textContent = '00:00';
+    
+    const list = document.getElementById('recordings-list');
+    if (list) list.innerHTML = '';
+    
+    const startBtn = document.getElementById('rec-start-btn');
+    const stopBtn = document.getElementById('rec-stop-btn');
+    if (startBtn) startBtn.disabled = false;
+    if (stopBtn) stopBtn.disabled = true;
+}
+
+export function onShow() {
+    // Logic to run when recorder view is shown
+}
+
 function startTimer() {
     startTime = Date.now();
     const display = document.getElementById('timer-display');

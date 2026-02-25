@@ -78,6 +78,13 @@ export function doSwitchView(viewName) {
     target.style.display = 'block';
     target.classList.add('active');
 
+    // Reset module specific states if necessary when switching
+    // This prevents background updates from one view breaking another
+    if (currentId === 'video_dub' && viewName !== 'video_dub') {
+        // If we have specialized cleanup logic in modules, we could call it here
+        console.log('Navigating away from Video Dubbing');
+    }
+
     // Update global state
     window.appState.currentView = viewName;
 

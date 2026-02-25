@@ -461,15 +461,36 @@ def extract_speaker_samples(
     speaker_config = {}
     
     for sid, segs in speakers.items():
-        # Find the segment that is likely the clearest (not too short, not too long)
-        # 5-10 seconds is ideal for a voice sample
-        ideal_segs = [s for s in segs if 3.0 < (s.end - s.start) < 15.0]
-        best_seg = ideal_segs[0] if ideal_segs else max(segs, key=lambda s: s.end - s.start)
+        # Calculate Statistics
+        total_duration = sum(s.end - s.start for s in segs)
+        intervention_count = len(segs)
+
+        # Sort segments by duration (longest first)
+        sorted_segs = sorted(segs, key=lambda s: s.end - s.start, reverse=True)
         
-        # Extract audio with explicit bounds check
-        start_sample = max(0, int(best_seg.start * sr))
-        end_sample = min(len(audio_np), int(best_seg.end * sr))
-        sample_audio = audio_np[start_sample:end_sample]
+        selected_audio = []
+        accumulated_time = 0
+        
+        # Combine the longest segments to make a solid reference (max 15s)
+        for s in sorted_segs:
+            if accumulated_time >= 15.0:
+                break
+            
+            start_sample = max(0, int(s.start * sr))
+            end_sample = min(len(audio_np), int(s.end * sr))
+            chunk = audio_np[start_sample:end_sample]
+            
+            selected_audio.append(chunk)
+            accumulated_time += (s.end - s.start)
+            
+            # Add 0.5s silence between jumps to prevent jarring cuts
+            silence = np.zeros(int(0.5 * sr), dtype=audio_np.dtype)
+            selected_audio.append(silence)
+            
+        if selected_audio:
+            sample_audio = np.concatenate(selected_audio)
+        else:
+            sample_audio = np.zeros(sr, dtype=audio_np.dtype)
         
         # Save sample
         sample_path = samples_dir / f"speaker_{sid}_sample.wav"
@@ -481,11 +502,13 @@ def extract_speaker_samples(
         speaker_config[str(sid)] = {
             "name": f"Speaker {sid + 1}",
             "action": "dub",
-            "sample_path": f"/temp_chunks/{task_id}/speaker_samples/speaker_{sid}_sample.wav"
+            "sample_path": f"/temp_chunks/{task_id}/speaker_samples/speaker_{sid}_sample.wav",
+            "total_duration": round(total_duration, 2),
+            "intervention_count": intervention_count
         }
         
         if progress_callback:
-            progress_callback(f"Extracted sample for speaker {sid + 1}")
+            progress_callback(f"Extracted sample for speaker {sid + 1} ({round(total_duration, 1)}s total)")
     
     return speaker_samples, speaker_config
 
@@ -636,10 +659,21 @@ async def run_transcription_phase(
 
     try:
         task = db.get_task(task_id)
-        segments = [SpeechSegment.from_dict(s) for s in task.get('segments', [])]
+        raw_segments = task.get('segments', [])
+        speaker_config = task.get('speaker_config', {})
         master_audio = task.get('master_audio')
 
-        await report("transcribing", 10, "Starting Whisper transcription...")
+        # FILTER: Only keep segments for speakers marked as 'dub'
+        filtered_segments = []
+        for s_data in raw_segments:
+            sid = str(s_data.get('speaker_id'))
+            action = speaker_config.get(sid, {}).get('action', 'dub')
+            
+            if action != 'remove':
+                filtered_segments.append(SpeechSegment.from_dict(s_data))
+        
+        segments = filtered_segments
+        await report("transcribing", 10, f"Starting transcription for {len(segments)} valid segments...")
         
         def trans_progress_sync(cur, tot):
             current_pct = 10 + int((cur / tot) * 40)

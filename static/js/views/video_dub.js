@@ -4,12 +4,16 @@ import { doSwitchView } from '../app.js';
 window.openMonitor = openMonitor;
 window.restartFromTask = restartFromTask;
 window.startNewProject = startNewProject;
+window.jumpToPhaseReview = jumpToPhaseReview;
+window.removeMergeGroup = removeMergeGroup;
 
 let currentWs = null;
 let currentTaskId = null;
 let downloadedVideoPath = null;
 let downloadedVideoFilename = null;  // Store filename for download
 let currentTaskState = {};           // Single source of truth for UI state
+let activeUIPhase = 'init';          // Tracks which phase UI is currently displayed
+let lastServerPhase = null;          // Tracks last reported server phase to detect progress
 
 // Speaker merge state
 let speakerMergeState = {
@@ -29,20 +33,22 @@ const DEFAULT_SETTINGS = {
 };
 
 export function init() {
-    // 1. Bind Upload Form
-    const uploadForm = document.getElementById('upload-form');
-    if (uploadForm) uploadForm.addEventListener('submit', handleUpload);
+    // 1. Bind Config Form
+    const configForm = document.getElementById('config-form');
+    if (configForm) configForm.addEventListener('submit', handleDubStart);
+
+    // 2. Bind upload-only button
+    const uploadOnlyBtn = document.getElementById('upload-only-btn');
+    if (uploadOnlyBtn) uploadOnlyBtn.addEventListener('click', handleInitialUpload);
     
-    // 2. Bind YouTube Download
+    // 3. Bind YouTube Download
     const ytBtn = document.getElementById('download-youtube-btn');
     if (ytBtn) ytBtn.addEventListener('click', handleYouTubeDownload);
     
-    // 3. Bind File Input Change (visual feedback)
+    // 4. Bind File Input Change (visual feedback)
     const fileInput = document.getElementById('video-input');
     if (fileInput) fileInput.addEventListener('change', updateFileDisplay);
 
-    // 4. Validation Confirm buttons are now dynamically created in the render functions based on the current phase
-    
     // 5. Bind "New Project" button on result page
     const newProjectBtn = document.getElementById('result-new-project-btn');
     if (newProjectBtn) {
@@ -62,7 +68,6 @@ export function init() {
     bindSettingsPersistence();
 }
 
-// NEW: Bind settings change listeners to save to localStorage
 function bindSettingsPersistence() {
     const srcLang = document.getElementById('src-lang');
     const tgtLang = document.getElementById('tgt-lang');
@@ -79,38 +84,27 @@ function bindSettingsPersistence() {
         
         try {
             localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-            console.log('Settings saved:', settings);
         } catch (e) {
             console.warn('Could not save settings:', e);
         }
     };
 
-    // Add change listeners
     if (srcLang) srcLang.addEventListener('change', saveSettings);
     if (tgtLang) tgtLang.addEventListener('change', saveSettings);
     if (ttsEngine) ttsEngine.addEventListener('change', saveSettings);
     if (separateAudio) separateAudio.addEventListener('change', saveSettings);
 }
 
-// NEW: Load saved settings from localStorage
 function loadSavedSettings() {
     try {
         const saved = localStorage.getItem(SETTINGS_KEY);
-        if (!saved) {
-            console.log('No saved settings found, using defaults');
-            return DEFAULT_SETTINGS;
-        }
-        
-        const settings = JSON.parse(saved);
-        console.log('Settings loaded:', settings);
-        return { ...DEFAULT_SETTINGS, ...settings };
+        if (!saved) return DEFAULT_SETTINGS;
+        return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
     } catch (e) {
-        console.warn('Could not load settings:', e);
         return DEFAULT_SETTINGS;
     }
 }
 
-// NEW: Apply loaded settings to form fields
 function applySettingsToForm(settings) {
     const srcLang = document.getElementById('src-lang');
     const tgtLang = document.getElementById('tgt-lang');
@@ -126,40 +120,33 @@ function applySettingsToForm(settings) {
 }
 
 export function onShow() {
-    console.log('VideoDub view shown. Current task ID:', currentTaskId);
-    
-    // If we have an active task ID, we're in monitor mode - resume monitoring
     if (currentTaskId) {
         loadAndMonitor(currentTaskId);
     } else {
-        // NEW: Load and apply saved settings when showing the form
         const settings = loadSavedSettings();
         applySettingsToForm(settings);
     }
-    // Otherwise, the HTML already shows the upload step by default (active class)
-    // No need to explicitly call showWizardStep here - let the HTML state persist
 }
 
 export function startNewProject() {
-    console.log('Starting fresh new project');
-    
-    // Reset all state
     currentTaskId = null;
     downloadedVideoPath = null;
     currentTaskState = {};
     speakerMergeState = { selected: new Set(), groups: [] };
     
-    // Close any existing WebSocket
     if (currentWs) {
         currentWs.close();
         currentWs = null;
     }
     
-    // Reset the upload form
     const uploadForm = document.getElementById('upload-form');
     if (uploadForm) uploadForm.reset();
+    const configForm = document.getElementById('config-form');
+    if (configForm) configForm.reset();
     
-    // Reset file display
+    document.getElementById('media-selection-section')?.classList.remove('hidden');
+    document.getElementById('dub-config-section')?.classList.add('hidden');
+    
     const fileDisplay = document.getElementById('file-display-text');
     if (fileDisplay) fileDisplay.innerText = 'Click to browse or drag video file here';
     
@@ -175,17 +162,11 @@ export function startNewProject() {
     const startBtn = document.getElementById('start-btn');
     if (startBtn) startBtn.disabled = true;
     
-    // Clear any previous terminal logs
     const term = document.getElementById('processing-term');
     if (term) term.innerHTML = '';
     
-    // Reset granular task list
-    const taskList = document.getElementById('granular-task-list');
-    if (taskList) {
-        taskList.innerHTML = '<div class="empty-state">Waiting for workflow...</div>';
-    }
+    renderStaticChain({ phase: 'init', status: 'pending' });
     
-    // Reset progress bar
     const progressBar = document.getElementById('main-progress-bar');
     if (progressBar) progressBar.style.width = '0%';
     
@@ -195,24 +176,19 @@ export function startNewProject() {
     const statusText = document.getElementById('processing-status-text');
     if (statusText) statusText.innerText = 'Initializing...';
     
-    // Reset video player
     const finalVideo = document.getElementById('final-video');
     if (finalVideo) {
         finalVideo.src = '';
         finalVideo.load();
     }
     
-    // Reset merge UI
     resetMergeUI();
     
-    // NEW: Load and apply saved settings
     const settings = loadSavedSettings();
     applySettingsToForm(settings);
     
-    // Show upload step
     showWizardStep('state-upload');
     
-    // Switch to video dub view if not already there
     const viewEl = document.getElementById('view-video_dub');
     if (viewEl && !viewEl.classList.contains('active')) {
         doSwitchView('video_dub');
@@ -220,7 +196,6 @@ export function startNewProject() {
 }
 
 export function openMonitor(taskId) {
-    // Don't switch view if already on video_dub - just load the task
     const currentView = document.querySelector('.view-section.active');
     if (!currentView || currentView.id !== 'view-video_dub') {
         doSwitchView('video_dub');
@@ -228,31 +203,23 @@ export function openMonitor(taskId) {
     loadAndMonitor(taskId);
 }
 
-// --- HELPER TO SWITCH WIZARD STEPS ---
 function showWizardStep(stepId) {
-    // Hide all steps
-    document.querySelectorAll('.wizard-step').forEach(el => {
+    document.querySelectorAll('#stage-content-area .wizard-step').forEach(el => {
         el.classList.add('hidden');
         el.classList.remove('active');
     });
     
-    // Show target step
     const target = document.getElementById(stepId);
     if (target) {
         target.classList.remove('hidden');
         target.classList.add('active');
-    } else {
-        console.error(`Wizard step not found: ${stepId}`);
     }
 
-    // Toggle shared timeline header
     const timeline = document.getElementById('task-timeline-header');
     if (timeline) {
-        if (stepId === 'state-upload') {
-            timeline.classList.add('hidden');
-        } else {
-            timeline.classList.remove('hidden');
-        }
+        const hasFile = document.getElementById('video-input')?.files?.length > 0;
+        const isLanding = !currentTaskId && !hasFile;
+        timeline.classList.toggle('hidden', isLanding);
     }
 }
 
@@ -263,19 +230,14 @@ async function downloadYouTubeVideo() {
     }
     
     try {
-        // Use the backend download endpoint
         const downloadUrl = `/api/youtube/download-file?file_path=${encodeURIComponent(downloadedVideoPath)}`;
-        
-        // Create temporary link and trigger download
         const link = document.createElement('a');
         link.href = downloadUrl;
         link.download = downloadedVideoFilename || 'youtube_video.mp4';
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-        
     } catch (err) {
-        console.error('Download failed:', err);
         await window.uiAlert('Download failed: ' + err.message, 'Error');
     }
 }
@@ -310,15 +272,35 @@ async function handleYouTubeDownload() {
             `;
             statusEl.style.color = 'var(--success)';
             
-            // Bind download button
             const downloadBtn = document.getElementById('download-youtube-video-btn');
             if (downloadBtn) {
                 downloadBtn.addEventListener('click', downloadYouTubeVideo);
             }
             
+            document.getElementById('media-selection-section').classList.add('hidden');
+            document.getElementById('dub-config-section').classList.remove('hidden');
+            document.getElementById('config-filename').innerText = res.title;
+            
+            const uploadRes = await postJSON('/api/upload-youtube', {
+                file_path: downloadedVideoPath,
+                filename: downloadedVideoFilename,
+                tgt_lang: document.getElementById('tgt-lang').value,
+                src_lang: document.getElementById('src-lang').value,
+                separate_audio: document.getElementById('separate-audio').checked,
+                tts_engine: document.getElementById('tts-engine').value,
+                auto_start: false 
+            });
+            currentTaskId = uploadRes.task_id;
+            
+            currentTaskState = { phase: 'init', status: 'pending' };
+            renderStaticChain(currentTaskState);
+            const timeline = document.getElementById('task-timeline-header');
+            if (timeline) timeline.classList.remove('hidden');
+            
+            connectWebSocket(currentTaskId);
+            showWizardStep('state-upload');
+
             document.getElementById('start-btn').disabled = false;
-            document.getElementById('file-display-text').innerText = `Using YouTube: ${res.title}`;
-            document.getElementById('drop-zone').style.borderColor = 'var(--success)';
         } else {
             throw new Error(res.error || "Unknown error");
         }
@@ -336,137 +318,134 @@ function updateFileDisplay(e) {
     if (file) {
         document.getElementById('file-display-text').innerText = `Selected: ${file.name}`;
         document.getElementById('drop-zone').style.borderColor = 'var(--accent)';
-        document.getElementById('start-btn').disabled = false;
+        
+        const uploadBtn = document.getElementById('upload-only-btn');
+        if (uploadBtn) uploadBtn.disabled = false;
+        
         downloadedVideoPath = null; 
         const youtubeStatus = document.getElementById('youtube-status');
         if (youtubeStatus) youtubeStatus.style.display = 'none';
+        
+        const timeline = document.getElementById('task-timeline-header');
+        if (timeline) timeline.classList.remove('hidden');
+        renderStaticChain({ phase: 'init', status: 'pending' });
     }
 }
 
-async function handleUpload(e) {
-    e.preventDefault();
-    const btn = document.getElementById('start-btn');
-    const originalBtnContent = btn.innerHTML;
+async function handleInitialUpload() {
+    const btn = document.getElementById('upload-only-btn');
+    const originalContent = btn.innerHTML;
+    const uploadForm = document.getElementById('upload-form');
+    
     btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting...';
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Uploading...';
 
     try {
-        let endpoint = '/api/upload';
-        let body;
-        let headers = {};
+        const formData = new FormData(uploadForm);
+        formData.set('auto_start', 'false');
 
-        const formData = new FormData(e.target);
-        const separateAudio = document.getElementById('separate-audio').checked;
-        const srcLang = document.getElementById('src-lang').value;
-        const tgtLang = document.getElementById('tgt-lang').value;
-        const ttsEngine = document.getElementById('tts-engine').value;
-
-        if (downloadedVideoPath) {
-            endpoint = '/api/upload-youtube';
-            headers = { 'Content-Type': 'application/json' };
-            body = JSON.stringify({
-                file_path: downloadedVideoPath,
-                filename: "YouTube_Video",
-                src_lang: srcLang,
-                tgt_lang: tgtLang,
-                tts_engine: ttsEngine,
-                separate_audio: separateAudio
-            });
-        } else {
-            formData.set('separate_audio', separateAudio ? 'true' : 'false');
-            formData.set('src_lang', srcLang);
-            formData.set('tgt_lang', tgtLang);
-            formData.set('tts_engine', ttsEngine);
-            body = formData;
-        }
-
-        const res = await fetch(endpoint, { method: 'POST', headers, body });
-        if (!res.ok) {
-            const errorData = await res.json().catch(() => ({}));
-            throw new Error(errorData.detail || errorData.message || `HTTP ${res.status}`);
-        }
+        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        if (!res.ok) throw new Error("Upload failed");
         
         const data = await res.json();
+        currentTaskId = data.task_id;
         
-        // Reset downloaded video path after successful upload
-        downloadedVideoPath = null;
-        downloadedVideoFilename = null;
+        document.getElementById('media-selection-section').classList.add('hidden');
+        document.getElementById('dub-config-section').classList.remove('hidden');
         
-        openMonitor(data.task_id);
+        const fileInput = uploadForm.querySelector('input[type="file"]');
+        if (fileInput && fileInput.files[0]) {
+            document.getElementById('config-filename').innerText = fileInput.files[0].name;
+        }
+        
+        const timeline = document.getElementById('task-timeline-header');
+        if (timeline) timeline.classList.remove('hidden');
+        
+        currentTaskState = { phase: 'init', status: 'pending' };
+        renderStaticChain(currentTaskState);
+        
+        connectWebSocket(currentTaskId);
 
     } catch (err) {
-        await window.uiAlert('Error starting project: ' + err.message, 'Upload Failed');
+        await window.uiAlert("Upload failed: " + err.message);
         btn.disabled = false;
-        btn.innerHTML = originalBtnContent;
+        btn.innerHTML = originalContent;
+    }
+}
+
+async function handleDubStart(e) {
+    e.preventDefault();
+    if (!currentTaskId) return;
+
+    const btn = document.getElementById('start-btn');
+    const originalContent = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-sync fa-spin"></i> Initializing...';
+
+    try {
+        const formData = new FormData(e.target);
+        showWizardStep('state-processing');
+        logToTerm("Starting pipeline initialization...", "step");
+
+        await postJSON(`/api/projects/${currentTaskId}/restart`, {
+            from_phase: 'identifying',
+            src_lang: formData.get('src_lang'),
+            tgt_lang: formData.get('tgt_lang'),
+            tts_engine: formData.get('tts_engine'),
+            whisper_model: formData.get('whisper_model'),
+            separate_audio: formData.get('separate_audio') === 'on',
+            vad_threshold: formData.get('vad_threshold')
+        });
+    } catch (err) {
+        showWizardStep('state-upload');
+        document.getElementById('media-selection-section').classList.add('hidden');
+        document.getElementById('dub-config-section').classList.remove('hidden');
+        
+        await window.uiAlert("Failed to start: " + err.message);
+        btn.disabled = false;
+        btn.innerHTML = originalContent;
     }
 }
 
 async function loadAndMonitor(taskId, retryCount = 0) {
     currentTaskId = taskId;
-    
     try {
         const task = await getJSON(`/api/projects/${taskId}`);
-        // Populate global state immediately
         Object.assign(currentTaskState, task);
         renderTaskState(task);
         connectWebSocket(taskId);
     } catch(err) {
-        // Handle transient race conditions where task isn't yet committed/visible in DB
-        // Retry up to 5 times with increasing delay
         if (err.message.includes('404') && retryCount < 5) {
             const delay = 400 * (retryCount + 1);
-            console.warn(`Task ${taskId} not found yet (syncing DB...), retrying in ${delay}ms...`);
             setTimeout(() => loadAndMonitor(taskId, retryCount + 1), delay);
             return;
         }
-        
-        console.error("Failed to load task", err);
         logToTerm(`Error loading task: ${err.message}`, 'error');
     }
 }
 
 function connectWebSocket(taskId) {
-    // Don't close existing connection if it's the same task and still open
     if (currentWs) {
         if (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING) {
-            console.log('WebSocket already connected or connecting, skipping new connection');
             return;
         }
-        // Only close if it's a different task or already closing/closed
-        try {
-            currentWs.close();
-        } catch (e) {
-            console.log('Error closing old WebSocket:', e);
-        }
+        try { currentWs.close(); } catch (e) {}
         currentWs = null;
     }
     
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${proto}//${window.location.host}/ws/${taskId}`;
-    console.log('Connecting WebSocket to:', wsUrl);
-    
-    currentWs = new WebSocket(wsUrl);
+    currentWs = new WebSocket(`${proto}//${window.location.host}/ws/${taskId}`);
     let reconnectScheduled = false;
     
-    currentWs.onopen = () => {
-        console.log('WebSocket connected successfully');
-        reconnectScheduled = false;
-    };
+    currentWs.onopen = () => reconnectScheduled = false;
     
     currentWs.onmessage = (e) => {
         try {
             const msg = JSON.parse(e.data);
-            console.log('WS message:', msg.type, msg);
             
-            if (msg.type === 'state_sync') {
-                // Initial state received
-                renderTaskState(msg.data);
-            } else if (msg.type === 'task_progress') {
-                updateTaskProgress(msg.data);
-            } else if (msg.type === 'status_update') {
+            if (msg.type === 'state_sync' || msg.type === 'status_update') {
                 renderTaskState(msg.data);
             } else if (msg.type === 'progress') {
-                // Merge progress into state and trigger a full re-render
                 currentTaskState.phase = msg.data.phase;
                 currentTaskState.progress = msg.data.percent;
                 currentTaskState.message = msg.data.message;
@@ -474,15 +453,15 @@ function connectWebSocket(taskId) {
                 renderTaskState(currentTaskState);
             } else if (msg.type === 'log') {
                 logToTerm(msg.data.message, msg.data.style);
-            } else if (msg.type === 'pong') {
-                // Keepalive response, no action needed
             } else if (msg.type === 'speaker_validation_ready') {
                 Object.assign(currentTaskState, msg.data);
                 showSpeakerValidation(currentTaskState);
             } else if (msg.type === 'transcription_ready') {
-                showTranscriptionReview(msg.data);
+                Object.assign(currentTaskState, msg.data);
+                showTranscriptionReview(currentTaskState);
             } else if (msg.type === 'translation_ready') {
-                showTranslationReview(msg.data);
+                Object.assign(currentTaskState, msg.data);
+                showTranslationReview(currentTaskState.data || currentTaskState);
             } else if (msg.type === 'audio_ready') {
                 Object.assign(currentTaskState, msg.data);
                 showAudioValidation(currentTaskState);
@@ -502,26 +481,11 @@ function connectWebSocket(taskId) {
         }
     };
     
-    currentWs.onerror = (err) => {
-        console.error('WebSocket error:', err);
-        // Don't show error to user immediately, let onclose handle reconnection
-    };
-    
     currentWs.onclose = (event) => {
-        console.log('WebSocket closed', event.code, event.reason);
-        
-        // Don't reconnect if:
-        // 1. No current task
-        // 2. Task is completed
-        // 3. Already scheduled a reconnect
-        // 4. Normal closure (code 1000 or 1001)
         const isCompleted = document.getElementById('state-result')?.classList.contains('active');
         const isNormalClose = event.code === 1000 || event.code === 1001;
         
-        if (!currentTaskId || isCompleted || reconnectScheduled || isNormalClose) {
-            console.log('Not reconnecting WebSocket:', {currentTaskId, isCompleted, reconnectScheduled, isNormalClose});
-            return;
-        }
+        if (!currentTaskId || isCompleted || reconnectScheduled || isNormalClose) return;
         
         reconnectScheduled = true;
         logToTerm('Connection lost - reconnecting in 3s...', 'warning');
@@ -529,7 +493,6 @@ function connectWebSocket(taskId) {
         setTimeout(() => {
             reconnectScheduled = false;
             if (currentTaskId && currentWs?.readyState !== WebSocket.OPEN) {
-                console.log('Attempting WebSocket reconnect...');
                 connectWebSocket(currentTaskId);
             }
         }, 3000);
@@ -537,26 +500,42 @@ function connectWebSocket(taskId) {
 }
 
 async function renderTaskState(task) {
-    console.log('Rendering task state:', task.status, task.phase);
-    Object.assign(currentTaskState, task);
+    const phaseChanged = task.phase !== lastServerPhase;
+    lastServerPhase = task.phase;
 
-    // CRITICAL: If we are in a validation phase but segments are missing, 
-    // fetch the full task object from the API to ensure we have all data.
+    Object.assign(currentTaskState, task);
+    renderStaticChain(currentTaskState);
+
+    if (task.phase === 'init' || task.status === 'awaiting_input') {
+        showWizardStep('state-upload');
+        document.getElementById('media-selection-section').classList.add('hidden');
+        document.getElementById('dub-config-section').classList.remove('hidden');
+        document.getElementById('config-filename').innerText = task.filename || task.input_filename || "Project Ready";
+        
+        if (task.src_lang) document.getElementById('src-lang').value = task.src_lang;
+        if (task.tgt_lang) document.getElementById('tgt-lang').value = task.tgt_lang;
+        if (task.tts_engine) document.getElementById('tts-engine').value = task.tts_engine;
+        if (task.separate_audio !== undefined) document.getElementById('separate-audio').checked = !!task.separate_audio;
+        if (task.whisper_model) document.getElementById('whisper-model').value = task.whisper_model;
+        if (task.vad_threshold) {
+            const vadInp = document.querySelector('input[name="vad_threshold"]');
+            if (vadInp) vadInp.value = task.vad_threshold;
+            const vadVal = document.getElementById('vad-val');
+            if (vadVal) vadVal.innerText = `Saved (${task.vad_threshold})`;
+        }
+        return; 
+    }
+
     const isValidationPhase = task.status === 'awaiting_validation' || task.phase?.includes('awaiting');
     const needsData = isValidationPhase && !task.segments && !task.transcribed_segments && !task.speaker_config;
     
     if (needsData && task.task_id) {
-        console.log("Validation phase detected with missing data, fetching full task state...");
         try {
             const fullTask = await getJSON(`/api/projects/${task.task_id}`);
             Object.assign(currentTaskState, fullTask);
-        } catch (e) { 
-            // Silent error here because WebSocket messages come frequently and will re-trigger this
-            console.debug("Transient error fetching task details during state sync:", e); 
-        }
+        } catch (e) { }
     }
 
-    // Sync progress bar
     const progressBar = document.getElementById('main-progress-bar');
     const progressText = document.getElementById('processing-percent');
     const statusText = document.getElementById('processing-status-text');
@@ -568,84 +547,87 @@ async function renderTaskState(task) {
     if (progressText) progressText.innerText = `${pct}%`;
     if (statusText && currentTaskState.message) statusText.innerText = currentTaskState.message;
 
-    // Update workflow chain (Always use static chain as it represents the true live phases)
-    renderStaticChain(currentTaskState);
-
-    // CRITICAL: Ensure timeline is visible if we are processing (not upload)
     const timeline = document.getElementById('task-timeline-header');
     if (timeline && currentTaskState.phase !== 'init' && currentTaskState.status !== 'pending') {
         timeline.classList.remove('hidden');
     }
 
-    // Handle Granular Validation Phases
     const phase = currentTaskState.phase;
     const status = currentTaskState.status;
     const hasSegments = (currentTaskState.segments && currentTaskState.segments.length > 0) || 
                         (currentTaskState.transcribed_segments && currentTaskState.transcribed_segments.length > 0);
     
-    console.log(`UI State Check: phase=${phase}, status=${status}, hasSegments=${hasSegments}`);
+    const isVisibleStep1 = document.getElementById('state-upload').classList.contains('active');
+    if (isVisibleStep1 && (status === 'pending' || status === 'awaiting_input')) {
+        document.getElementById('media-selection-section').classList.add('hidden');
+        document.getElementById('dub-config-section').classList.remove('hidden');
+        return; 
+    }
 
-    // Handle Granular Validation Phases
-    // Fix: Use jumpToPhaseReview to ensure consistent UI routing when returning to a project
-    if (phase === 'awaiting_transcription_review') {
-        jumpToPhaseReview('awaiting_transcription_review');
+    const interactionPhases = [
+        'awaiting_speaker_validation', 
+        'awaiting_transcription_review', 
+        'awaiting_translation_review', 
+        'awaiting_audio_validation',
+        'complete'
+    ];
+
+    let targetPhaseUI = phase;
+
+    const processingToInteractionMap = {
+        'identifying': 'init',
+        'transcribing': 'awaiting_speaker_validation',
+        'translating': 'awaiting_transcription_review',
+        'synthesizing': 'awaiting_translation_review',
+        'recomposing': 'awaiting_audio_validation'
+    };
+
+    if (interactionPhases.includes(phase)) {
+        targetPhaseUI = phase;
+    } else if (processingToInteractionMap[phase]) {
+        targetPhaseUI = processingToInteractionMap[phase];
+    } else if (status === 'awaiting_validation') {
+        if (currentTaskState.translation_segments) targetPhaseUI = 'awaiting_audio_validation';
+        else if (currentTaskState.transcribed_segments) targetPhaseUI = 'awaiting_translation_review';
+        else if (currentTaskState.segments) targetPhaseUI = 'awaiting_transcription_review';
+        else targetPhaseUI = 'awaiting_speaker_validation';
     }
-    else if (phase === 'awaiting_speaker_validation' || (status === 'awaiting_validation' && !hasSegments)) {
-        jumpToPhaseReview('awaiting_speaker_validation');
-    } 
-    else if (phase === 'awaiting_translation_review') {
-        jumpToPhaseReview('awaiting_translation_review');
-    }
-    else if (phase === 'awaiting_audio_validation') {
-        jumpToPhaseReview('awaiting_audio_validation');
-    }
-    else if (status === 'awaiting_validation') {
-        // Generic fallback: check data presence
-        if (hasSegments) jumpToPhaseReview('awaiting_transcription_review');
-        else jumpToPhaseReview('awaiting_speaker_validation');
-    }
-    else if (currentTaskState.status === 'completed' || phase === 'complete') {
-        showTranslationReview({
-            segments: currentTaskState.segments || [],
-            target_language: currentTaskState.tgt_lang || 'en',
-            source_language: currentTaskState.src_lang || 'auto'
-        });
-    }
-    else if (phase === 'awaiting_audio_validation') {
-        showAudioValidation(currentTaskState);
-    }
+
     if (currentTaskState.status === 'completed' || phase === 'complete') {
-        showWizardStep('state-result');
-        const finalVideo = document.getElementById('final-video');
-        const downloadBtn = document.getElementById('download-btn');
-        
-        if (finalVideo && currentTaskState.output_path) {
-            // Normalize path for the browser
-            let webPath = currentTaskState.output_path.replace(/\\/g, '/');
-            if (!webPath.startsWith('/')) webPath = '/' + webPath;
-            
-            // Add a cache-buster to force the video to reload if re-rendered
-            const cacheBuster = `?t=${new Date().getTime()}`;
-            finalVideo.src = webPath + cacheBuster;
-            
-            // Ensure player is ready
-            finalVideo.load();
-            console.log("Loading final video from:", webPath);
-        }
-        
-        if (downloadBtn) {
-            // Force the button to use the API download endpoint instead of the raw path
-            downloadBtn.href = `/api/projects/${currentTaskId}/download`;
-        }
+        targetPhaseUI = 'complete';
     } else if (currentTaskState.status === 'failed' || currentTaskState.status === 'error') {
         logToTerm(`FAILED: ${currentTaskState.error_message || 'Unknown error'}`, 'error');
         if (statusText) {
             statusText.innerHTML = `<span style="color:var(--danger)">FAILED: ${currentTaskState.error_message || 'Unknown error'}</span>`;
         }
+        targetPhaseUI = 'processing';
+    }
+
+    // Only auto-jump UI if the server phase has actually changed/progressed
+    // or if we are currently in the 'processing' catch-all view
+    if (targetPhaseUI !== 'processing') {
+        if (phaseChanged || activeUIPhase === 'processing') {
+            jumpToPhaseReview(targetPhaseUI);
+        }
     } else {
-        const processingStep = document.getElementById('state-processing');
-        if (processingStep && processingStep.classList.contains('hidden')) {
-            showWizardStep('state-processing');
+        showWizardStep('state-processing');
+        activeUIPhase = 'processing';
+    }
+
+    if (targetPhaseUI === 'complete' || currentTaskState.status === 'completed') {
+        const finalVideo = document.getElementById('final-video');
+        const downloadBtn = document.getElementById('download-btn');
+        
+        if (finalVideo && currentTaskState.output_path) {
+            let webPath = currentTaskState.output_path.replace(/\\/g, '/');
+            if (!webPath.startsWith('/')) webPath = '/' + webPath;
+            const cacheBuster = `?t=${new Date().getTime()}`;
+            finalVideo.src = webPath + cacheBuster;
+            finalVideo.load();
+        }
+        
+        if (downloadBtn) {
+            downloadBtn.href = `/api/projects/${currentTaskId}/download`;
         }
     }
 }
@@ -654,69 +636,56 @@ function renderStaticChain(task) {
     const container = document.getElementById('granular-task-list');
     if (!container) return;
     
-    // Updated granular phases
+    // Ensure we have an active UI phase set
+    if (!activeUIPhase) activeUIPhase = task.phase || 'init';
+
     const phases = [
-        { id: 'identifying', name: 'Speaker Diarization' },
-        { id: 'awaiting_speaker_validation', name: 'Speaker Confirmation' },
-        { id: 'transcribing', name: 'Transcription' },
-        { id: 'awaiting_transcription_review', name: 'Transcription Review' },
-        { id: 'translating', name: 'Translation' },
-        { id: 'awaiting_translation_review', name: 'Translation Review' },
-        { id: 'synthesizing', name: 'Voice Synthesis' },
-        { id: 'awaiting_audio_validation', name: 'Audio Review' },
-        { id: 'recomposing', name: 'Final Assembly' },
-        { id: 'complete', name: 'Completed' }
+        { id: 'init', name: '1. Configuration', type: 'interaction' },
+        { id: 'identifying', name: '2. Diarization', type: 'computation' },
+        { id: 'awaiting_speaker_validation', name: '3. Speaker Validation', type: 'interaction' },
+        { id: 'transcribing', name: '4. Transcription', type: 'computation' },
+        { id: 'awaiting_transcription_review', name: '5. Transcript Validation', type: 'interaction' },
+        { id: 'translating', name: '6. Translation', type: 'computation' },
+        { id: 'awaiting_translation_review', name: '7. Translation Validation', type: 'interaction' },
+        { id: 'synthesizing', name: '8. Audio Generation', type: 'computation' },
+        { id: 'awaiting_audio_validation', name: '9. Audio Validation', type: 'interaction' },
+        { id: 'recomposing', name: '10. Fusion (Assembly)', type: 'computation' },
+        { id: 'complete', name: '11. Preview & Download', type: 'interaction' }
     ];
 
     let ph = task.phase || 'init';
-    let currentPhaseIdx = -1;
     
-    // Map backend phases to UI timeline index
     const phaseMap = {
-        'init': 0,
-        'extraction': 0,
-        'identifying': 0, 
-        'samples': 0,
-        'awaiting_speaker_validation': 1,
-        'transcribing': 2, 'running_transcription': 2,
-        'awaiting_transcription_review': 3,
-        'translating': 4, 'running_translation': 4,
-        'awaiting_translation_review': 5,
-        'synthesizing': 6, 'tts_synthesis': 6, 'running_synthesis': 6,
-        'awaiting_audio_validation': 7,
-        'recomposing': 8,
-        'complete': 9, 'completed': 9, 'complete': 9
+        'init': 0, 'identifying': 1, 'awaiting_speaker_validation': 2,
+        'transcribing': 3, 'awaiting_transcription_review': 4,
+        'translating': 5, 'awaiting_translation_review': 6,
+        'synthesizing': 7, 'awaiting_audio_validation': 8,
+        'recomposing': 9, 'complete': 10
     };
     
-    currentPhaseIdx = phaseMap[ph] !== undefined ? phaseMap[ph] : 0;
-    
-    // Force completion if status says so
-    if (task.status === 'completed' || task.status === 'done' || ph === 'complete') {
-        currentPhaseIdx = 9;
-    }
+    let currentPhaseIdx = phaseMap[ph] !== undefined ? phaseMap[ph] : 0;
+    if (task.status === 'completed' || task.status === 'done') currentPhaseIdx = 10;
 
     let html = '';
     phases.forEach((phaseObj, idx) => {
         let statusClass = 'pending';
-        let iconClass = 'fa-circle';
-        
+        let iconClass = phaseObj.type === 'interaction' ? 'fa-user-pen' : 'fa-microchip';
+        const nodeTypeClass = phaseObj.type === 'interaction' ? 'interaction-node' : 'compute-node';
+
         if (idx < currentPhaseIdx) {
             statusClass = 'completed';
             iconClass = 'fa-check';
         } else if (idx === currentPhaseIdx) {
-            // Highlight this as the current logical step
-            statusClass += ' active-step';
             if (task.status === 'failed' || task.status === 'error') {
                 statusClass = 'failed';
                 iconClass = 'fa-times';
             } else if (task.status === 'paused') {
                 statusClass = 'skipped';
                 iconClass = 'fa-pause';
-            } else if (idx === 2 || idx === 4) { 
-                // UI review states
-                if (task.status === 'awaiting_validation' || task.phase === 'awaiting_translation_review') {
-                    statusClass = 'skipped'; 
-                    iconClass = 'fa-exclamation';
+            } else if (idx === 2 || idx === 4 || idx === 6 || idx === 8) { 
+                if (task.status === 'awaiting_validation' || task.phase.includes('awaiting')) {
+                    statusClass = 'attention'; // Changed from skipped
+                    iconClass = 'fa-pen-nib'; // Changed from exclamation
                 } else {
                     statusClass = 'running';
                     iconClass = 'fa-spinner fa-spin';
@@ -730,11 +699,16 @@ function renderStaticChain(task) {
             }
         }
         
-        const showRestart = (statusClass === 'completed' || statusClass === 'failed') && 
-                            ['init', 'identifying', 'translating', 'tts_synthesis', 'recomposing'].includes(phaseObj.id);
+        // Apply classes for AI progress vs User focus
+        if (phaseObj.id === activeUIPhase) {
+            statusClass += ' user-viewing';
+        }
+        
+        const showRestart = (statusClass === 'completed' || statusClass === 'failed' || statusClass.includes('active-step')) && 
+                            ['init', 'identifying', 'transcribing', 'translating', 'synthesizing', 'recomposing'].includes(phaseObj.id);
         
         html += `
-            <div id="task-node-${phaseObj.id}" class="task-node ${statusClass}" onclick="jumpToPhaseReview('${phaseObj.id}')">
+            <div id="task-node-${phaseObj.id}" class="task-node ${statusClass} ${nodeTypeClass}" onclick="jumpToPhaseReview('${phaseObj.id}')">
                 <div class="node-icon-wrapper">
                     <i class="node-icon fas ${iconClass}"></i>
                 </div>
@@ -755,67 +729,163 @@ function renderStaticChain(task) {
     container.innerHTML = html;
 }
 
-// Removed legacy renderChain and updateTaskProgress functions to prevent UI freezing
+/**
+ * Force switches the UI to a specific phase, fetching data if necessary.
+ */
+async function jumpToPhaseReview(phaseId) {
+    if (!currentTaskId) return;
 
-// Ensure accessible globally
-window.restartFromTask = restartFromTask;
-window.jumpToPhaseReview = jumpToPhaseReview;
+    console.log(`Manual Jump Requested: ${phaseId}`);
 
-function jumpToPhaseReview(phaseId) {
-    console.log(`Jumping to review for: ${phaseId}`);
+    // 1. Force state refresh to ensure we have the most recent data (speaker configs, etc)
+    const isValidationPhase = phaseId.includes('awaiting_') || phaseId === 'init';
+    if (isValidationPhase) {
+        try {
+            const freshTask = await getJSON(`/api/projects/${currentTaskId}`);
+            Object.assign(currentTaskState, freshTask);
+        } catch (e) {
+            console.warn("Could not refresh task state for jump:", e);
+        }
+    }
+
+    // 2. Update tracked UI phase so re-renders keep the highlight
+    activeUIPhase = phaseId;
+
+    const isProcessing = ['processing', 'queued', 'running'].includes(currentTaskState.status);
     
-    // Highlight the current selection in the chain
+    if (isProcessing && currentTaskState.phase !== phaseId && phaseId !== 'complete') {
+        const confirmed = await window.uiConfirm(
+            `An AI process is currently running.\n\nJumping to another step will STOP the current process.\n\nDo you want to proceed?`,
+            "Stop Current Task?"
+        );
+        if (!confirmed) return;
+        
+        try {
+            await postJSON(`/api/projects/${currentTaskId}/cancel`, {});
+            logToTerm(`Task stopped by user. Routing to ${phaseId} UI...`, "warning");
+            currentTaskState.status = 'paused';
+        } catch (e) {
+            console.error("Stop failed:", e);
+        }
+    }
+
     document.querySelectorAll('.task-node').forEach(n => n.classList.remove('active-step'));
     const node = document.getElementById(`task-node-${phaseId}`);
     if (node) node.classList.add('active-step');
 
-    const hasTranscription = (currentTaskState.segments?.length > 0) || (currentTaskState.transcribed_segments?.length > 0);
+    const hasSegments = (currentTaskState.segments?.length > 0) || (currentTaskState.transcribed_segments?.length > 0);
+
+    // Update the "Fun" Stage Header
+    const stageHeader = document.getElementById('dynamic-stage-header');
+    if (stageHeader) {
+        const isWaiting = currentTaskState.status === 'awaiting_validation' || phaseId.includes('awaiting');
+        stageHeader.innerHTML = isWaiting 
+            ? `<div class="stage-badge waiting"><i class="fas fa-hand-paper"></i> Waiting for your input</div>`
+            : `<div class="stage-badge thinking"><i class="fas fa-brain fa-spin"></i> AI is thinking...</div>`;
+    }
+
+    // Ensure the timeline updates its visual highlight immediately
+    renderStaticChain(currentTaskState);
 
     switch(phaseId) {
-        case 'identifying':
-        case 'awaiting_speaker_validation':
-            if (currentTaskState.speaker_config) showSpeakerValidation(currentTaskState);
+        case 'init':
+            showWizardStep('state-upload');
+            document.getElementById('media-selection-section').classList.add('hidden');
+            document.getElementById('dub-config-section').classList.remove('hidden');
             break;
-            
+
+        case 'identifying':
+        case 'awaiting_speaker_validation': 
+            console.log("Routing to Speaker Validation UI");
+            showWizardStep('state-validation');
+            showSpeakerValidation(currentTaskState);
+            break;
+
         case 'transcribing':
         case 'awaiting_transcription_review':
-            if (hasTranscription) showTranscriptionReview(currentTaskState);
-            else logToTerm("Transcription data not yet available for this phase", "warning");
+            console.log("Routing to Transcription Review UI");
+            showWizardStep('state-validation');
+            showTranscriptionReview(currentTaskState);
             break;
-            
+
         case 'translating':
         case 'awaiting_translation_review':
-            if (hasTranscription) {
-                showTranslationReview({
-                    segments: currentTaskState.segments || [],
-                    target_language: currentTaskState.tgt_lang || 'en',
-                    source_language: currentTaskState.src_lang || 'auto'
-                });
-            } else logToTerm("Translation data not yet available", "warning");
+            console.log("Routing to Translation Review UI");
+            showWizardStep('state-validation');
+            showTranslationReview({
+                segments: currentTaskState.segments || currentTaskState.transcribed_segments,
+                target_language: currentTaskState.tgt_lang || 'en',
+                source_language: currentTaskState.src_lang || 'auto'
+            });
             break;
-            
+
         case 'synthesizing':
         case 'awaiting_audio_validation':
-            if (currentTaskState.segments) showAudioValidation(currentTaskState);
+            console.log("Routing to Audio Validation UI");
+            showWizardStep('state-validation');
+            showAudioValidation(currentTaskState);
             break;
-            
+
         case 'recomposing':
+            showWizardStep('state-processing');
+            break;
+
         case 'complete':
             showWizardStep('state-result');
             break;
             
+        case 'awaiting_transcription_review':
+            showWizardStep('state-validation');
+            if (hasSegments) {
+                showTranscriptionReview(currentTaskState);
+            } else {
+                document.getElementById('state-validation').innerHTML = '<div class="card"><div class="empty-state">No transcription data available yet. Please run the previous steps.</div></div>';
+            }
+            break;
+            
+        case 'awaiting_translation_review':
+            showWizardStep('state-validation');
+            if (hasSegments) {
+                showTranslationReview({
+                    segments: currentTaskState.segments || currentTaskState.transcribed_segments,
+                    target_language: currentTaskState.tgt_lang || 'en',
+                    source_language: currentTaskState.src_lang || 'auto'
+                });
+            } else {
+                document.getElementById('state-validation').innerHTML = '<div class="card"><div class="empty-state">No translation data available yet. Please run the previous steps.</div></div>';
+            }
+            break;
+            
+        case 'awaiting_audio_validation':
+            showWizardStep('state-validation');
+            if (hasSegments) {
+                showAudioValidation(currentTaskState);
+            } else {
+                document.getElementById('state-validation').innerHTML = '<div class="card"><div class="empty-state">No audio data available yet. Please run the previous steps.</div></div>';
+            }
+            break;
+            
+        case 'complete':
+            if (currentTaskState.output_path) {
+                showWizardStep('state-result');
+            } else {
+                showWizardStep('state-processing');
+            }
+            break;
+            
         default:
             showWizardStep('state-processing');
+            break;
     }
 }
 
 async function restartFromTask(taskName) {
-    // Map UI static step IDs to backend phases
     const phaseMap = {
         'init': 'init',
         'identifying': 'identifying',
-        'translating': 'running_translation', // Route directly to translation runner
-        'tts_synthesis': 'tts_synthesis',
+        'transcribing': 'transcribing',
+        'translating': 'translating', 
+        'synthesizing': 'synthesizing',
         'recomposing': 'recomposing'
     };
     
@@ -824,17 +894,11 @@ async function restartFromTask(taskName) {
     const confirmed = await window.uiConfirm(`Restart from '${taskName}'? This will re-run this step and all following steps.`, 'Restart Workflow');
     if (!confirmed) return;
     
-    // Clear the terminal logs when restarting
     const term = document.getElementById('processing-term');
     if (term) term.innerHTML = '';
     
-    // Reset the task chain UI visually
-    const container = document.getElementById('granular-task-list');
-    if (container) {
-        container.innerHTML = '<div class="empty-state">Restarting workflow...</div>';
-    }
+    renderStaticChain({ phase: backendPhase, status: 'pending' });
     
-    // Reset progress
     const progressBar = document.getElementById('main-progress-bar');
     if (progressBar) progressBar.style.width = '0%';
     
@@ -847,7 +911,6 @@ async function restartFromTask(taskName) {
     try {
         await postJSON(`/api/projects/${currentTaskId}/restart`, { from_phase: backendPhase });
         
-        // Reload to get fresh state
         setTimeout(() => {
             if (currentTaskId) loadAndMonitor(currentTaskId);
         }, 500);
@@ -858,8 +921,6 @@ async function restartFromTask(taskName) {
     }
 }
 
-// Removed updateMainProgress as renderTaskState handles all UI syncing now
-
 function logToTerm(msg, style='info') {
     const term = document.getElementById('processing-term');
     if (!term) return;
@@ -867,20 +928,16 @@ function logToTerm(msg, style='info') {
     const div = document.createElement('div');
     div.className = `log-line ${style}`;
     
-    // Add timestamp
     const time = new Date().toLocaleTimeString();
     div.innerText = `[${time}] ${msg}`;
     
     term.appendChild(div);
     term.scrollTop = term.scrollHeight;
     
-    // Limit log lines to prevent memory issues
     while (term.children.length > 500) {
         term.removeChild(term.firstChild);
     }
 }
-
-// --- MERGE UI FUNCTIONS ---
 
 function resetMergeUI() {
     speakerMergeState = { selected: new Set(), groups: [] };
@@ -907,7 +964,6 @@ function setupMergeUI(speakerIds) {
     const status = document.getElementById('merge-status');
     if (!checkboxes) return;
     
-    // Create checkboxes for each speaker
     speakerIds.forEach(id => {
         const label = document.createElement('label');
         label.className = 'merge-checkbox';
@@ -941,7 +997,6 @@ function toggleSpeakerSelection(speakerId) {
         speakerMergeState.selected.add(speakerId);
     }
     
-    // Enable/disable merge button
     const applyBtn = document.getElementById('apply-merge-btn');
     if (applyBtn) {
         applyBtn.disabled = speakerMergeState.selected.size < 2;
@@ -970,19 +1025,14 @@ function applySpeakerMerge() {
     
     if (selected.length < 2) return;
     
-    // Add as a new merge group with name
     speakerMergeState.groups.push({
         ids: [...selected],
         name: groupName
     });
     
-    // Reset name input
     document.getElementById('merge-group-name').value = '';
-    
-    // Clear selection
     speakerMergeState.selected.clear();
     
-    // Update UI
     document.querySelectorAll('.merge-checkbox').forEach(cb => {
         cb.classList.remove('checked');
         cb.querySelector('input').checked = false;
@@ -1026,28 +1076,24 @@ function renderMergeGroups() {
     });
 }
 
-window.removeMergeGroup = function(groupIdx) {
+function removeMergeGroup(groupIdx) {
     speakerMergeState.groups.splice(groupIdx, 1);
     renderMergeGroups();
     updateSpeakerCardsForMerge();
-};
+}
 
 function updateSpeakerCardsForMerge() {
-    // Reset all cards
     document.querySelectorAll('.speaker-card').forEach(card => {
         card.classList.remove('merged-master', 'merged-into');
         card.style.position = '';
     });
     
-    // Apply merge styling
     speakerMergeState.groups.forEach(group => {
-        // First speaker in group is the "master" (keeps the voice)
-        const masterId = group[0];
+        const masterId = group.ids[0];
         const masterCard = document.querySelector(`.speaker-card[data-id="${masterId}"]`);
         if (masterCard) masterCard.classList.add('merged-master');
         
-        // Others are "merged into" the master
-        group.slice(1).forEach(id => {
+        group.ids.slice(1).forEach(id => {
             const card = document.querySelector(`.speaker-card[data-id="${id}"]`);
             if (card) {
                 card.classList.add('merged-into');
@@ -1057,117 +1103,12 @@ function updateSpeakerCardsForMerge() {
     });
 }
 
-// NEW: Show translation review UI
-function showTranslationReview(data) {
-    showWizardStep('state-validation');
-    
-    // Hide merge section and subtitle for translation review
-    const mergeSection = document.querySelector('.merge-section');
-    const subtitleText = document.querySelector('#state-validation > .subtitle');
-    if (mergeSection) mergeSection.style.display = 'none';
-    if (subtitleText) subtitleText.style.display = 'none';
-    
-    // Update header
-    const header = document.querySelector('#state-validation h3');
-    if (header) {
-        header.innerHTML = '<i class="fas fa-language"></i> Review Translations';
-    }
-    
-    const grid = document.getElementById('speaker-grid');
-    if (!grid) return;
-    
-    // Use full-width list mode
-    grid.className = 'review-list-container';
-    
-    const segments = data.segments || [];
-    const tgtLang = data.target_language || 'en';
-    const srcLang = data.source_language || 'auto';
-    
-    // Group by speaker
-    const bySpeaker = {};
-    segments.forEach(seg => {
-        const sid = seg.speaker_id;
-        if (!bySpeaker[sid]) bySpeaker[sid] = [];
-        bySpeaker[sid].push(seg);
-    });
-    
-    let html = '<div class="translation-review">';
-    html += `<p class="subtitle" style="margin-bottom:20px;">Review and edit translations side-by-side. ${srcLang !== 'auto' ? `Translating from ${srcLang} to ${tgtLang}` : `Auto-detect to ${tgtLang}`}</p>`;
-    
-    Object.entries(bySpeaker).forEach(([sid, segs]) => {
-        html += `
-            <div class="speaker-translation-group" data-speaker="${sid}" style="margin-bottom:20px;">
-                <div style="font-weight:600; margin-bottom:10px; color:var(--accent);">
-                    <i class="fas fa-user"></i> Speaker ${parseInt(sid) + 1}
-                </div>
-        `;
-        
-        segs.forEach(seg => {
-            const timeStr = formatTime(seg.start) + ' - ' + formatTime(seg.end);
-            html += `
-                <div class="translation-edit-row" data-idx="${seg.idx}" style="margin-bottom:12px; padding:12px; background:var(--bg-main); border-radius:6px; border:1px solid var(--border);">
-                    <div style="display:flex; justify-content:space-between; margin-bottom:8px; font-size:0.85rem; color:var(--text-muted);">
-                        <span><i class="fas fa-clock"></i> ${timeStr}</span>
-                    </div>
-                    <audio controls src="/api/projects/${currentTaskId}/preview/${seg.idx}" style="width:100%; height:30px; margin-bottom:8px;"></audio>
-                    <div class="side-by-side-container" style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
-                        <div class="original-column">
-                            <label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">
-                                <i class="fas fa-file-alt"></i> Original:
-                            </label>
-                            <div class="original-text" style="padding:10px; background:var(--bg-panel); border-radius:4px; color:var(--text-main); font-style:italic; min-height:60px; line-height:1.5;">
-                                ${seg.original_text || '[No text]'}
-                            </div>
-                        </div>
-                        <div class="translation-column">
-                            <label style="display:block; font-size:0.8rem; color:var(--accent); margin-bottom:4px;">
-                                <i class="fas fa-language"></i> Translation (${tgtLang}):
-                            </label>
-                            <textarea class="seg-translated" data-idx="${seg.idx}" rows="3" 
-                                style="width:100%; background:var(--bg-panel); border:1px solid var(--border); color:var(--text-main); padding:10px; border-radius:4px; font-family:inherit; resize:vertical; min-height:60px; line-height:1.5;">${seg.translated_text || ''}</textarea>
-                        </div>
-                    </div>
-                </div>
-            `;
-        });
-        
-        html += '</div>';
-    });
-    
-    html += '</div>';
-    grid.innerHTML = html;
-    
-    // Update header actions container with retry and generate buttons
-    const headerActions = document.querySelector('#state-validation .header-actions');
-    if (headerActions) {
-        headerActions.innerHTML = `
-            <button onclick="showWizardStep('state-processing')" class="btn-icon" title="View Logs">
-                <i class="fas fa-terminal"></i>
-            </button>
-            <button id="retry-translation-btn" class="btn-secondary">
-                <i class="fas fa-redo"></i> Retry Translation
-            </button>
-            <button id="start-dub-btn" class="btn-success">
-                <i class="fas fa-microphone"></i> Generate Voices
-            </button>
-        `;
-        document.getElementById('start-dub-btn').addEventListener('click', submitTranslationReview);
-        document.getElementById('retry-translation-btn').addEventListener('click', () => {
-            restartFromTask('translating');
-        });
-    }
-}
-
-// NEW: Submit transcription review
-// NEW: Submit transcription review
 // 1. Speaker Validation UI
-async function showSpeakerValidation(data) {
-    console.log("Showing speaker validation with data:", data);
+function showSpeakerValidation(data) {
     showWizardStep('state-validation');
     const header = document.querySelector('#state-validation h3');
     if (header) header.innerHTML = '<i class="fas fa-user-check"></i> Step 1: Confirm Speakers';
     
-    // Show merge, hide others
     const mergeSection = document.querySelector('.merge-section');
     const subtitleText = document.querySelector('#state-validation > .subtitle');
     if (mergeSection) mergeSection.style.display = 'block';
@@ -1177,7 +1118,6 @@ async function showSpeakerValidation(data) {
     if(!grid) return;
     
     grid.className = 'speaker-grid';
-    // Robustly find config in either data or data.data
     const config = data.speaker_config || data.data?.speaker_config || {};
     const entries = Object.entries(config);
 
@@ -1192,8 +1132,8 @@ async function showSpeakerValidation(data) {
     }
 
     grid.innerHTML = entries.map(([id, info]) => {
-        const mergedGroup = speakerMergeState.groups.find(g => g.includes(id));
-        const isMaster = mergedGroup && mergedGroup[0] === id;
+        const mergedGroup = speakerMergeState.groups.find(g => g.ids.includes(id));
+        const isMaster = mergedGroup && mergedGroup.ids[0] === id;
         const isMerged = mergedGroup && !isMaster;
         
         return `
@@ -1206,9 +1146,13 @@ async function showSpeakerValidation(data) {
                     <span class="checkmark"></span>
                     <span class="checkbox-text">
                         <span><i class="fas fa-volume-up"></i> Dub This Speaker</span>
-                        <span class="help-text">${isMerged ? 'Merged with Speaker ' + (parseInt(mergedGroup[0]) + 1) : 'Voice will be cloned'}</span>
+                        <span class="help-text">${isMerged ? 'Merged with Spk ' + (parseInt(mergedGroup.ids[0]) + 1) : 'Voice will be cloned'}</span>
                     </span>
                 </label>
+            </div>
+            <div class="spk-stats" style="display:flex; gap:12px; margin-bottom:8px; font-size:0.8rem; color:var(--text-muted);">
+                <span><i class="fas fa-clock"></i> ${info.total_duration || 0}s total</span>
+                <span><i class="fas fa-comment"></i> ${info.intervention_count || 0} segments</span>
             </div>
             <div class="spk-controls">
                 <input type="text" class="spk-name" value="${info.name || 'Speaker '+ (parseInt(id)+1)}" placeholder="Speaker Name" ${isMerged ? 'disabled' : ''}>
@@ -1222,20 +1166,29 @@ async function showSpeakerValidation(data) {
 
     const actions = document.querySelector('#state-validation .header-actions');
     actions.innerHTML = `
+        <button id="save-speakers-btn" class="btn-secondary">
+            <i class="fas fa-save"></i> Save Progress
+        </button>
         <button id="confirm-speakers-btn" class="btn-success">
             <i class="fas fa-check"></i> Confirm & Transcribe
         </button>
     `;
     document.getElementById('confirm-speakers-btn').onclick = submitSpeakerValidation;
+    document.getElementById('save-speakers-btn').onclick = () => saveStepProgress('speakers');
 }
 
 async function submitSpeakerValidation() {
+    // Optimistic UI update: Switch to processing view immediately
+    activeUIPhase = 'transcribing';
+    showWizardStep('state-processing');
+    renderStaticChain(currentTaskState);
+
     const speakers = {};
     const mergeMap = {};
     
     speakerMergeState.groups.forEach(group => {
-        const master = group[0];
-        group.slice(1).forEach(id => mergeMap[id] = master);
+        const master = group.ids[0];
+        group.ids.slice(1).forEach(id => mergeMap[id] = master);
     });
     
     document.querySelectorAll('.speaker-card').forEach(card => {
@@ -1244,10 +1197,9 @@ async function submitSpeakerValidation() {
         const isDub = card.querySelector('.spk-toggle').checked;
         const mergedInto = mergeMap[id];
         
-        // Find merged children if this is a master
         const merged_speakers = [];
         speakerMergeState.groups.forEach(group => {
-            if (group[0] === id) merged_speakers.push(...group.slice(1));
+            if (group.ids[0] === id) merged_speakers.push(...group.ids.slice(1));
         });
 
         speakers[id] = {
@@ -1260,19 +1212,72 @@ async function submitSpeakerValidation() {
     
     try {
         await postJSON(`/api/projects/${currentTaskId}/validate-speakers`, { speakers });
-        currentTaskState.phase = 'transcribing';
-        showWizardStep('state-processing');
     } catch (e) {
+        // Fallback if network fails
+        activeUIPhase = 'awaiting_speaker_validation';
+        showWizardStep('state-validation');
         await window.uiAlert("Validation failed: " + e.message, "Error");
     }
 }
 
-// 2. Transcription Review UI
+/**
+ * Common helper to extract all edited text from the current validation UI.
+ */
+function getSegmentsFromUI(selector = '.segment-edit-row', textAreaSelector = '.seg-original') {
+    const segments = [];
+    document.querySelectorAll(selector).forEach(row => {
+        segments.push({
+            idx: parseInt(row.dataset.idx),
+            speaker_id: parseInt(row.dataset.speaker || row.dataset.speakerId),
+            start: parseFloat(row.dataset.start),
+            end: parseFloat(row.dataset.end),
+            original_text: row.querySelector(textAreaSelector).value,
+            translated_text: row.querySelector('.seg-translated')?.value || ""
+        });
+    });
+    return segments;
+}
+
+/**
+ * Generic save function that updates segments without triggering next phase
+ */
+async function saveTranscriptionProgress() {
+    const segments = getSegmentsFromUI();
+    const btn = document.getElementById('save-transcription-btn');
+    const oldHtml = btn.innerHTML;
+    
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+
+    try {
+        // Use the validation endpoint but with a flag to not proceed
+        await postJSON(`/api/projects/${currentTaskId}/validate-transcription`, { 
+            segments, 
+            save_only: true 
+        });
+        
+        // Update local state so it doesn't revert
+        currentTaskState.segments = segments;
+        
+        btn.innerHTML = '<i class="fas fa-check"></i> Saved!';
+        btn.classList.add('btn-success');
+        
+        setTimeout(() => {
+            btn.innerHTML = oldHtml;
+            btn.disabled = false;
+            btn.classList.remove('btn-success');
+        }, 2000);
+    } catch (e) {
+        btn.innerHTML = '<i class="fas fa-times"></i> Error';
+        await window.uiAlert("Save failed: " + e.message);
+        btn.disabled = false;
+    }
+}
+
+// 2. Transcription Review UI (Chronological)
 function showTranscriptionReview(data) {
-    console.log("Rendering Transcription Review UI...");
     showWizardStep('state-validation');
     
-    // Explicitly hide Step 1 elements
     const mergeSection = document.querySelector('.merge-section');
     const step1Subtitle = document.querySelector('#state-validation > .subtitle');
     if (mergeSection) mergeSection.style.display = 'none';
@@ -1284,26 +1289,20 @@ function showTranscriptionReview(data) {
     const grid = document.getElementById('speaker-grid');
     if (!grid) return;
 
-    // Clear old buttons immediately to prevent UI confusion
-    
-    const actions = document.getElementById('validation-actions-container');
+    const actions = document.querySelector('#state-validation .header-actions');
     if (actions) actions.innerHTML = '';
 
     grid.className = 'review-list-container';
     grid.innerHTML = '<div class="empty-state"><i class="fas fa-spinner fa-spin"></i> Preparing transcript...</div>';
     
-    // Look for segments in all possible locations
     let segments = data.transcribed_segments || data.segments || data.data?.transcribed_segments || data.data?.segments || [];
     let speakerConfig = data.speaker_config || data.data?.speaker_config || {};
 
-    console.log(`Found ${Array.isArray(segments) ? segments.length : '0'} segments to render.`);
-
-    // Handle stringified JSON from database
     if (typeof segments === 'string') {
-        try { segments = JSON.parse(segments); } catch(e) { console.error("Parse segments failed", e); }
+        try { segments = JSON.parse(segments); } catch(e) {}
     }
     if (typeof speakerConfig === 'string') {
-        try { speakerConfig = JSON.parse(speakerConfig); } catch(e) { console.error("Parse config failed", e); }
+        try { speakerConfig = JSON.parse(speakerConfig); } catch(e) {}
     }
 
     if (!Array.isArray(segments) || segments.length === 0) {
@@ -1311,85 +1310,261 @@ function showTranscriptionReview(data) {
         return;
     }
     
-    // Group segments by speaker
-    const bySpeaker = {};
-    segments.forEach(seg => {
+    segments.sort((a, b) => a.start - b.start);
+    
+    let html = '<div class="transcription-review chronological-list">';
+    
+    segments.forEach((seg, arrayIdx) => {
         const sid = seg.speaker_id;
-        if (!bySpeaker[sid]) bySpeaker[sid] = [];
-        bySpeaker[sid].push(seg);
-    });
-    
-    let html = '<div class="transcription-review">';
-    
-    Object.entries(bySpeaker).forEach(([sid, segs]) => {
-        // Find the speaker name from the config, ensuring we handle string/int ID mismatches
         let spkName = `Speaker ${parseInt(sid) + 1}`;
         if (speakerConfig && (speakerConfig[sid] || speakerConfig[parseInt(sid)])) {
             const info = speakerConfig[sid] || speakerConfig[parseInt(sid)];
             if (info.name) spkName = info.name;
         }
 
-        html += `
-            <div class="speaker-transcription-group">
-                <div class="spk-header">
-                    <span class="avatar">${parseInt(sid) + 1}</span>
-                    <span style="font-weight:600; color: var(--accent);">${spkName}</span>
-                </div>
-                <div class="segments-list">
-        `;
+        const lookupIdx = seg.idx !== undefined ? seg.idx : arrayIdx;
+        const timeStr = formatTime(seg.start) + ' - ' + formatTime(seg.end);
         
-        segs.forEach((seg, arrayIdx) => {
-            // Use seg.idx if available, otherwise fallback to index in current data array
-            const lookupIdx = seg.idx !== undefined ? seg.idx : segments.indexOf(seg);
-            const timeStr = formatTime(seg.start) + ' - ' + formatTime(seg.end);
-            html += `
-                <div class="segment-edit-row" data-idx="${lookupIdx}" data-speaker="${sid}" data-start="${seg.start}" data-end="${seg.end}">
-                    <div style="display:flex; justify-content:space-between; margin-bottom:4px; font-size:0.8rem; color:var(--text-muted);">
-                        <span>${timeStr}</span>
-                    </div>
-                    <audio controls preload="none" src="/api/projects/${currentTaskId}/preview/${lookupIdx}" style="width:100%; height:32px; margin-bottom:6px;"></audio>
-                    <textarea class="seg-original" style="width:100%">${seg.original_text || ''}</textarea>
+        html += `
+            <div class="segment-edit-row chronological-card" data-idx="${lookupIdx}" data-speaker="${sid}" data-start="${seg.start}" data-end="${seg.end}">
+                <div class="seg-header">
+                    <span class="avatar sm">${parseInt(sid) + 1}</span>
+                    <span class="spk-name">${spkName}</span>
+                    <span class="seg-time"><i class="fas fa-clock"></i> ${timeStr}</span>
                 </div>
-            `;
-        });
-        html += '</div></div>';
+                <audio controls preload="none" src="/api/projects/${currentTaskId}/preview/${lookupIdx}" style="width:100%; height:40px; margin-bottom:6px; border-radius: 6px;"></audio>
+                <textarea class="seg-original" style="width:100%; min-height:80px;">${seg.original_text || ''}</textarea>
+            </div>
+        `;
     });
+    
     html += '</div>';
     grid.innerHTML = html;
     
-    // Reuse the 'actions' variable declared at the top of the function
     if (actions) {
         actions.innerHTML = `
+            <button id="save-transcription-btn" class="btn-secondary">
+                <i class="fas fa-save"></i> Save Progress
+            </button>
             <button id="confirm-transcription-btn" class="btn-success">
                 <i class="fas fa-language"></i> Confirm & Translate
             </button>
         `;
-        const confirmBtn = document.getElementById('confirm-transcription-btn');
-        if (confirmBtn) confirmBtn.onclick = submitTranscriptionReview;
+        document.getElementById('confirm-transcription-btn').onclick = submitTranscriptionReview;
+        document.getElementById('save-transcription-btn').onclick = () => saveStepProgress('transcription');
     }
 }
 
 async function submitTranscriptionReview() {
-    const segments = [];
-    document.querySelectorAll('.segment-edit-row').forEach(row => {
-        segments.push({
+    const segments = getSegmentsFromUI();
+
+    // Optimistic UI update: Switch to processing view immediately
+    activeUIPhase = 'translating';
+    showWizardStep('state-processing');
+    renderStaticChain(currentTaskState);
+    
+    try {
+        await postJSON(`/api/projects/${currentTaskId}/validate-transcription`, { segments });
+    } catch (e) {
+        activeUIPhase = 'awaiting_transcription_review';
+        showWizardStep('state-validation');
+        await window.uiAlert("Failed to submit transcription: " + e.message);
+    }
+}
+
+// 3. Translation Review UI (Chronological)
+function showTranslationReview(data) {
+    showWizardStep('state-validation');
+    
+    const mergeSection = document.querySelector('.merge-section');
+    const subtitleText = document.querySelector('#state-validation > .subtitle');
+    if (mergeSection) mergeSection.style.display = 'none';
+    if (subtitleText) subtitleText.style.display = 'none';
+    
+    const header = document.querySelector('#state-validation h3');
+    if (header) {
+        header.innerHTML = '<i class="fas fa-language"></i> Review Translations';
+    }
+    
+    const grid = document.getElementById('speaker-grid');
+    if (!grid) return;
+    
+    grid.className = 'review-list-container';
+    
+    let segments = data.segments || [];
+    const tgtLang = data.target_language || 'en';
+    const srcLang = data.source_language || 'auto';
+    
+    segments.sort((a, b) => a.start - b.start);
+    const speakerConfig = currentTaskState.speaker_config || {};
+    
+    let html = '<div class="translation-review chronological-list">';
+    html += `<p class="subtitle" style="margin-bottom:20px;">Review and edit translations side-by-side. ${srcLang !== 'auto' ? `Translating from ${srcLang} to ${tgtLang}` : `Auto-detect to ${tgtLang}`}</p>`;
+    
+    segments.forEach((seg) => {
+        const sid = seg.speaker_id;
+        let spkName = `Speaker ${parseInt(sid) + 1}`;
+        if (speakerConfig && (speakerConfig[sid] || speakerConfig[parseInt(sid)])) {
+            const info = speakerConfig[sid] || speakerConfig[parseInt(sid)];
+            if (info.name) spkName = info.name;
+        }
+
+        const timeStr = formatTime(seg.start) + ' - ' + formatTime(seg.end);
+        
+        html += `
+            <div class="translation-edit-row chronological-card" data-idx="${seg.idx}">
+                <div class="seg-header">
+                    <span class="avatar sm">${parseInt(sid) + 1}</span>
+                    <span class="spk-name">${spkName}</span>
+                    <span class="seg-time"><i class="fas fa-clock"></i> ${timeStr}</span>
+                </div>
+                <audio controls preload="none" src="/api/projects/${currentTaskId}/preview/${seg.idx}" style="width:100%; height:40px; margin-bottom:8px; border-radius: 6px;"></audio>
+                
+                <div class="side-by-side-container" style="display:grid; grid-template-columns:1fr 1fr; gap:12px;">
+                    <div class="original-column">
+                        <label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">
+                            <i class="fas fa-file-alt"></i> Original:
+                        </label>
+                        <div class="original-text" style="padding:10px; background:var(--bg-panel); border-radius:4px; color:var(--text-main); font-style:italic; min-height:80px; line-height:1.5;">
+                            ${seg.original_text || '[No text]'}
+                        </div>
+                    </div>
+                    <div class="translation-column">
+                        <label style="display:block; font-size:0.8rem; color:var(--accent); margin-bottom:4px;">
+                            <i class="fas fa-language"></i> Translation (${tgtLang}):
+                        </label>
+                        <textarea class="seg-translated" data-idx="${seg.idx}" 
+                            style="width:100%; background:var(--bg-panel); border:1px solid var(--border); color:var(--text-main); padding:10px; border-radius:4px; font-family:inherit; resize:vertical; min-height:80px; line-height:1.5;">${seg.translated_text || ''}</textarea>
+                    </div>
+                </div>
+            </div>
+        `;
+    });
+    
+    html += '</div>';
+    grid.innerHTML = html;
+    
+    const headerActions = document.querySelector('#state-validation .header-actions');
+    if (headerActions) {
+        headerActions.innerHTML = `
+            <button onclick="document.getElementById('state-validation').classList.remove('active'); document.getElementById('state-processing').classList.add('active');" class="btn-icon" title="View Logs">
+                <i class="fas fa-terminal"></i>
+            </button>
+            <button id="save-translation-btn" class="btn-secondary">
+                <i class="fas fa-save"></i> Save Progress
+            </button>
+            <button id="retry-translation-btn" class="btn-secondary">
+                <i class="fas fa-redo"></i> Retry Translation
+            </button>
+            <button id="start-dub-btn" class="btn-success">
+                <i class="fas fa-microphone"></i> Generate Voices
+            </button>
+        `;
+        document.getElementById('start-dub-btn').addEventListener('click', submitTranslationReview);
+        document.getElementById('save-translation-btn').onclick = () => saveStepProgress('translation');
+        document.getElementById('retry-translation-btn').addEventListener('click', () => {
+            restartFromTask('translating');
+        });
+    }
+}
+
+/**
+ * Generic save function for any validation step
+ */
+async function saveStepProgress(stepType) {
+    let endpoint = '';
+    let payload = {};
+    let btnId = '';
+
+    if (stepType === 'speakers') {
+        endpoint = `/api/projects/${currentTaskId}/validate-speakers`;
+        btnId = 'save-speakers-btn';
+        const speakers = {};
+        document.querySelectorAll('.speaker-card').forEach(card => {
+            const id = card.dataset.id;
+            speakers[id] = {
+                name: card.querySelector('.spk-name').value,
+                action: card.querySelector('.spk-toggle').checked ? 'dub' : 'remove'
+            };
+        });
+        payload = { speakers, save_only: true };
+    } else if (stepType === 'transcription') {
+        endpoint = `/api/projects/${currentTaskId}/validate-transcription`;
+        btnId = 'save-transcription-btn';
+        payload = { segments: getSegmentsFromUI(), save_only: true };
+    } else if (stepType === 'translation') {
+        endpoint = `/api/projects/${currentTaskId}/validate-translation`;
+        btnId = 'save-translation-btn';
+        const edited = [];
+        document.querySelectorAll('.translation-edit-row').forEach(row => {
+            edited.push({
+                idx: parseInt(row.dataset.idx),
+                original_text: row.querySelector('.original-text').textContent.trim(),
+                translated_text: row.querySelector('.seg-translated').value
+            });
+        });
+        payload = { segments: edited, save_only: true };
+    }
+
+    const btn = document.getElementById(btnId);
+    const oldHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving...';
+
+    try {
+        await postJSON(endpoint, payload);
+        btn.innerHTML = '<i class="fas fa-check"></i> Saved';
+        btn.classList.add('btn-success');
+        setTimeout(() => {
+            btn.innerHTML = oldHtml;
+            btn.disabled = false;
+            btn.classList.remove('btn-success');
+        }, 2000);
+    } catch (e) {
+        btn.innerHTML = '<i class="fas fa-times"></i> Error';
+        btn.disabled = false;
+        await window.uiAlert("Save failed: " + e.message);
+    }
+}
+
+async function submitTranslationReview() {
+    // Optimistic UI update: Switch to processing view immediately
+    activeUIPhase = 'synthesizing';
+    showWizardStep('state-processing');
+    renderStaticChain(currentTaskState);
+
+    const edited_segments = [];
+    document.querySelectorAll('.translation-edit-row').forEach(row => {
+        edited_segments.push({
             idx: parseInt(row.dataset.idx),
-            speaker_id: parseInt(row.dataset.speaker),
-            start: parseFloat(row.dataset.start),
-            end: parseFloat(row.dataset.end),
-            original_text: row.querySelector('.seg-original').value,
-            translated_text: "" // Clear translation if text changed
+            original_text: row.querySelector('.original-text').textContent.trim(),
+            translated_text: row.querySelector('.seg-translated').value
         });
     });
     
-    await postJSON(`/api/projects/${currentTaskId}/validate-transcription`, { segments });
-    currentTaskState.phase = 'translating';
-    showWizardStep('state-processing');
+    const btn = document.getElementById('start-dub-btn');
+    if (!btn) return;
+    
+    const originalContent = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting Voice Synthesis...';
+
+    try {
+        await postJSON(`/api/projects/${currentTaskId}/validate-translation`, { 
+            segments: edited_segments,
+            edited_segments: edited_segments,
+            proceed_to_tts: true
+        });
+    } catch(err) {
+        activeUIPhase = 'awaiting_translation_review';
+        showWizardStep('state-validation');
+        await window.uiAlert("Error: " + err.message, 'Validation Failed');
+        btn.disabled = false;
+        btn.innerHTML = originalContent;
+    }
 }
 
-// 3. Translation Review - Handled by specialized logic below
-
-// 4. Audio Validation (New)
+// 4. Audio Validation
 function showAudioValidation(data) {
     showWizardStep('state-validation');
     document.querySelector('.merge-section').style.display = 'none';
@@ -1401,7 +1576,6 @@ function showAudioValidation(data) {
     grid.innerHTML = `
         <div style="text-align:center; padding:20px;">
             <p>Audio segments generated. You can listen to the preview below.</p>
-            <!-- Add a simple list of generated segments to play -->
             <div style="max-height:400px; overflow-y:auto; text-align:left;">
                 ${(data.segments || []).map(s => `
                     <div style="padding:10px; border-bottom:1px solid var(--border);">
@@ -1424,37 +1598,4 @@ function showAudioValidation(data) {
         currentTaskState.phase = 'recomposing';
         showWizardStep('state-processing');
     };
-}
-
-// NEW: Submit translation review
-async function submitTranslationReview() {
-    const edited_segments = []; // Fixed variable name to match usage below
-    document.querySelectorAll('.translation-edit-row').forEach(row => {
-        edited_segments.push({
-            idx: parseInt(row.dataset.idx),
-            original_text: row.querySelector('.original-text').textContent.trim(),
-            translated_text: row.querySelector('.seg-translated').value
-        });
-    });
-    
-    const btn = document.getElementById('start-dub-btn');
-    if (!btn) return;
-    
-    const originalContent = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Starting Voice Synthesis...';
-
-    try {
-        // Send as a wrapped object to match backend expectations
-        await postJSON(`/api/projects/${currentTaskId}/validate-translation`, { 
-            segments: edited_segments,
-            edited_segments: edited_segments,
-            proceed_to_tts: true
-        });
-        showWizardStep('state-processing');
-    } catch(err) {
-        await window.uiAlert("Error: " + err.message, 'Validation Failed');
-        btn.disabled = false;
-        btn.innerHTML = originalContent;
-    }
 }

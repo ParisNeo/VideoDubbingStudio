@@ -12,6 +12,7 @@ Checkpoints:
 """
 
 import asyncio
+import time
 import json
 import soundfile as sf
 import numpy as np
@@ -188,22 +189,28 @@ Text: {text}
 
 Translation to {lang_name}:"""
     
-    def translate(self, text: str) -> str:
-        """Translate a single text segment."""
+    def translate(self, text: str, max_retries: int = 3) -> str:
+        """Translate a single text segment with retry logic."""
         if not self.lollms:
             self._load()
         
         if not self.lollms:
-            # Fallback: return original
             return text
         
-        try:
-            prompt = self._build_prompt(text)
-            result = self.lollms.generate_text(prompt, temperature=0.3)
-            return result.strip()
-        except Exception as e:
-            logger.warning(f"Translation failed: {e}")
-            return text  # Fallback
+        for attempt in range(max_retries):
+            try:
+                prompt = self._build_prompt(text)
+                result = self.lollms.generate_text(prompt, temperature=0.3)
+                return result.strip()
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 2
+                    logger.warning(f"Translation attempt {attempt + 1} failed: {e}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Translation failed after {max_retries} attempts: {e}")
+        
+        return text  # Final fallback: return original text
     
     def translate_batch(self, 
                        segments: List[TranslationSegment],
@@ -678,10 +685,20 @@ async def run_phase2(
         if not seg_data:
             raise ValueError("No transcribed segments found - run Phase 1 first")
         
-        segments = [TranslationSegment.from_dict(s) for s in seg_data]
+        speaker_config = task.get('speaker_config', {})
+        
+        # FILTER: Double-check speaker actions before translation/synthesis
+        filtered_segments = []
+        for s_data in seg_data:
+            sid = str(s_data.get('speaker_id'))
+            action = speaker_config.get(sid, {}).get('action', 'dub')
+            if action != 'remove':
+                filtered_segments.append(TranslationSegment.from_dict(s_data))
+        
+        segments = filtered_segments
         master_audio = task.get('master_audio')
         
-        await report("loading", 35, f"Loaded {len(segments)} segments")
+        await report("loading", 35, f"Processing {len(segments)} segments (skipping removed speakers)")
         
         # Step 1: Translation
         await report("translating", 40, "Starting translation...")
