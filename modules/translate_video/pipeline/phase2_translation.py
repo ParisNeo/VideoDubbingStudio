@@ -33,7 +33,7 @@ import importlib.util
 
 from core.resources import manager
 from core.database import db
-
+from ascii_colors import trace_exception
 logger = logging.getLogger("phase2_translation")
 
 
@@ -275,13 +275,22 @@ def install_fishspeech_if_missing():
             logger.warning(f"Failed to install FishSpeech: {e}")
 
 
+
 class TTSEngine:
-    """Handles TTS synthesis with multiple backends."""
+    """
+    Handles TTS synthesis with multiple backends.
     
-    def __init__(self, 
-                 engine: str = "f5",
-                 speaker_config: Optional[Dict[str, Any]] = None,
-                 target_language: str = "en"):
+    Supported engines:
+        - xtts: Coqui XTTS v2 (recommended - most stable, multilingual)
+        - f5: F5-TTS (high quality, sensitive)
+        - fishspeech: FishSpeech (API-based)
+        - lollms: LoLLMs TTS (API-based)
+        - bark: Suno Bark (creative, emotional)
+        - styletts2: StyleTTS2 (fast, good quality)
+        - piper: Piper (fastest, no cloning)
+    """
+    
+    def __init__(self, engine: str = "xtts", speaker_config: Optional[Dict[str, Any]] = None, target_language: str = "en"):
         self.engine = engine.lower()
         self.speaker_config = speaker_config or {}
         self.target_language = target_language
@@ -368,7 +377,7 @@ class TTSEngine:
         if not all(p.exists() for p in [self.vqgan_ckpt, self.dac_ckpt]):
             raise RuntimeError(f"FishSpeech checkpoints not found in {self.checkpoint_dir}")
     
-    def _synthesize_f5(self, text: str, ref_path: str) -> np.ndarray:
+    def _synthesize_f5(self, ref_text:str, text: str, ref_path: str) -> np.ndarray:
         """Synthesize with F5-TTS."""
         from f5_tts.infer.utils_infer import infer_process
         
@@ -398,7 +407,7 @@ class TTSEngine:
             # Generate
             audio, sr_out, _ = infer_process(
                 ref_audio=ref_tmp,
-                ref_text="",
+                ref_text=ref_text,
                 gen_text=text,
                 model_obj=self.f5_model,
                 vocoder=self.f5_vocoder,
@@ -481,6 +490,45 @@ class TTSEngine:
             
             return audio
     
+    def _synthesize_xtts(self, text: str, sample_path: str) -> np.ndarray:
+        """Synthesize with Coqui XTTS v2."""
+        from modules.tts.logic import generate_speech_xtts
+        audio, sr = generate_speech_xtts(
+            text=text,
+            ref_audio_path=sample_path,
+            device=manager.device,
+            language=self.target_language
+        )
+        return audio
+    
+    def _synthesize_bark(self, text: str) -> np.ndarray:
+        """Synthesize with Suno Bark."""
+        from modules.tts.logic import generate_speech_bark
+        audio, sr = generate_speech_bark(
+            text=text,
+            device=manager.device
+        )
+        return audio
+    
+    def _synthesize_styletts2(self, text: str, sample_path: str) -> np.ndarray:
+        """Synthesize with StyleTTS2."""
+        from modules.tts.logic import generate_speech_styletts2
+        audio, sr = generate_speech_styletts2(
+            text=text,
+            ref_audio_path=sample_path,
+            device=manager.device
+        )
+        return audio
+    
+    def _synthesize_piper(self, text: str) -> np.ndarray:
+        """Synthesize with Piper TTS."""
+        from modules.tts.logic import generate_speech_piper
+        audio, sr = generate_speech_piper(
+            text=text,
+            voice="en_US-lessac-medium"
+        )
+        return audio
+    
     def _synthesize_lollms(self, text: str, speaker_id: int) -> np.ndarray:
         """Synthesize with LoLLMs TTS with voice cloning support."""
         from modules.tts.logic import generate_speech_lollms
@@ -544,16 +592,31 @@ class TTSEngine:
                 else:
                     # Synthesize based on engine
                     try:
-                        if self.engine == 'f5':
-                            audio = self._synthesize_f5(segment.translated_text, sample_path)
-                        elif self.engine == 'fishspeech':
-                            audio = self._synthesize_fishspeech(segment.translated_text, sample_path)
-                        else:  # lollms
-                            audio = self._synthesize_lollms(segment.translated_text, effective_id)
-                        
-                        is_silence = False
+                        # CRITICAL: Detect text that is purely punctuation/symbols (common crash cause)
+                        clean_text = re.sub(r'[^\w\s]', '', str(segment.translated_text)).strip()
+                        if not clean_text:
+                            logger.warning(f"Segment {segment.idx} contains no alphanumeric characters. Using silence.")
+                            audio = np.zeros(int(target_duration * 24000))
+                            is_silence = True
+                        else:
+                            if self.engine == 'xtts':
+                                audio = self._synthesize_xtts(segment.translated_text, sample_path)
+                            elif self.engine == 'f5':
+                                audio = self._synthesize_f5(segment.original_text, segment.translated_text, sample_path)
+                            elif self.engine == 'fishspeech':
+                                audio = self._synthesize_fishspeech(segment.translated_text, sample_path)
+                            elif self.engine == 'bark':
+                                audio = self._synthesize_bark(segment.translated_text)
+                            elif self.engine == 'styletts2':
+                                audio = self._synthesize_styletts2(segment.translated_text, sample_path)
+                            elif self.engine == 'piper':
+                                audio = self._synthesize_piper(segment.translated_text)
+                            else:  # lollms
+                                audio = self._synthesize_lollms(segment.translated_text, effective_id)
+                            is_silence = False
                         
                     except Exception as synth_error:
+                        trace_exception(synth_error)
                         logger.error(f"TTS engine failed for segment {segment.idx}: {synth_error}")
                         # Fallback: generate silence with warning
                         audio = np.zeros(int(target_duration * 24000))
@@ -561,7 +624,7 @@ class TTSEngine:
                         segment.error = f"TTS failed, using silence: {str(synth_error)[:100]}"
                 
                 # Time-stretch to match duration exactly (Prevents Overlap)
-                if not is_silence:
+                if not is_silence and audio is not None and len(audio) > 0:
                     current_duration = len(audio) / 24000
                     
                     # If the audio is more than 50ms different from target, stretch it
@@ -572,6 +635,7 @@ class TTSEngine:
                             rate = current_duration / target_duration
                             
                             # Safety limits for extreme stretching
+                            if rate <= 0: rate = 1.0
                             rate = max(0.5, min(rate, 2.0))
                             
                             audio = librosa.effects.time_stretch(audio, rate=rate)

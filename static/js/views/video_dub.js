@@ -391,8 +391,8 @@ async function handleDubStart(e) {
             tgt_lang: formData.get('tgt_lang'),
             tts_engine: formData.get('tts_engine'),
             whisper_model: formData.get('whisper_model'),
-            separate_audio: formData.get('separate_audio') === 'on',
-            vad_threshold: formData.get('vad_threshold')
+            separate_audio: formData.get('separate_audio') === 'on' || formData.get('separate_audio') === 'true',
+            vad_threshold: parseFloat(formData.get('vad_threshold'))
         });
     } catch (err) {
         showWizardStep('state-upload');
@@ -572,19 +572,23 @@ async function renderTaskState(task) {
 
     let targetPhaseUI = phase;
 
-    // If the server is in a computing phase, the UI should stay in 'processing' (Log View)
-    // unless the user manually jumps elsewhere.
-    const computingPhases = ['identifying', 'transcribing', 'translating', 'synthesizing', 'recomposing'];
-
-    if (interactionPhases.includes(phase)) {
-        targetPhaseUI = phase;
-    } else if (computingPhases.includes(phase)) {
-        targetPhaseUI = 'processing';
-    } else if (status === 'awaiting_validation') {
-        if (currentTaskState.translation_segments) targetPhaseUI = 'awaiting_audio_validation';
-        else if (currentTaskState.transcribed_segments) targetPhaseUI = 'awaiting_translation_review';
-        else if (currentTaskState.segments) targetPhaseUI = 'awaiting_transcription_review';
-        else targetPhaseUI = 'awaiting_speaker_validation';
+    // CRITICAL: If status is awaiting_validation, force UI to the correct review phase regardless of 'phase' string
+    if (status === 'awaiting_validation' || interactionPhases.includes(phase)) {
+        if (phase === 'awaiting_audio_validation' || (currentTaskState.segments && currentTaskState.segments.some(s => s.audio_path))) {
+            targetPhaseUI = 'awaiting_audio_validation';
+        } else if (phase === 'awaiting_translation_review' || (currentTaskState.segments && currentTaskState.segments.some(s => s.translated_text))) {
+            targetPhaseUI = 'awaiting_translation_review';
+        } else if (phase === 'awaiting_transcription_review' || (currentTaskState.segments && currentTaskState.segments.some(s => s.original_text))) {
+            targetPhaseUI = 'awaiting_transcription_review';
+        } else {
+            targetPhaseUI = 'awaiting_speaker_validation';
+        }
+    } else {
+        // If the server is in a computing phase, the UI should stay in 'processing' (Log View)
+        const computingPhases = ['identifying', 'transcribing', 'translating', 'synthesizing', 'recomposing'];
+        if (computingPhases.includes(phase)) {
+            targetPhaseUI = 'processing';
+        }
     }
 
     if (currentTaskState.status === 'completed' || phase === 'complete') {
@@ -658,6 +662,15 @@ function renderStaticChain(task) {
     };
     
     let currentPhaseIdx = phaseMap[ph] !== undefined ? phaseMap[ph] : 0;
+    
+    // Force highlight to the next validation step if the computation step is technically "active" but finished
+    if (task.status === 'awaiting_validation') {
+        if (ph === 'translating') currentPhaseIdx = 6;
+        else if (ph === 'transcribing') currentPhaseIdx = 4;
+        else if (ph === 'identifying') currentPhaseIdx = 2;
+        else if (ph === 'synthesizing') currentPhaseIdx = 8;
+    }
+    
     if (task.status === 'completed' || task.status === 'done') currentPhaseIdx = 10;
 
     let html = '';
@@ -1383,7 +1396,7 @@ function showTranslationReview(data) {
     
     const header = document.querySelector('#state-validation h3');
     if (header) {
-        header.innerHTML = '<i class="fas fa-language"></i> Review Translations';
+        header.innerHTML = '<i class="fas fa-language"></i> Step 3: Review Translations';
     }
     
     const grid = document.getElementById('speaker-grid');
@@ -1391,8 +1404,9 @@ function showTranslationReview(data) {
     
     grid.className = 'review-list-container';
     
-    let segments = data.segments || [];
-    const tgtLang = data.target_language || 'en';
+    // Fallback chain for segments data
+    let segments = data.segments || data.translation_segments || data.transcribed_segments || [];
+    const tgtLang = data.target_language || data.tgt_lang || 'en';
     const srcLang = data.source_language || 'auto';
     
     segments.sort((a, b) => a.start - b.start);

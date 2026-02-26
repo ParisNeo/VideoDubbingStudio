@@ -124,11 +124,15 @@
 
                                 <div class="option-group">
                                     <label>Voice Engine</label>
-                                    <select name="tts_engine" id="tts-engine" class="input-select">
-                                        <option value="f5" selected>F5-TTS (High Quality)</option>
-                                        <option value="fishspeech">FishSpeech</option>
-                                        <option value="lollms">LoLLMs TTS</option>
-                                    </select>
+                        <select id="tts-engine" name="tts_engine" class="input-select">
+                            <option value="xtts" selected>XTTS v2 (Recommended - Most Stable)</option>
+                            <option value="f5">F5-TTS (High Quality)</option>
+                            <option value="styletts2">StyleTTS2 (Fast)</option>
+                            <option value="bark">Bark (Creative/Emotional)</option>
+                            <option value="fishspeech">FishSpeech (API)</option>
+                            <option value="lollms">LoLLMs TTS (API)</option>
+                            <option value="piper">Piper (Fastest, No Cloning)</option>
+                        </select>
                                 </div>
 
                                 <div class="option-group" style="grid-column: span 2;">

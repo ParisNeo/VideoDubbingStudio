@@ -172,9 +172,11 @@ class TaskManager:
                 )
                 
                 # Stop for Translation Review
+                seg_list = [s.to_dict() for s in segments]
                 db.update_task(
                     task_id,
-                    segments=[s.to_dict() for s in segments],
+                    segments=seg_list,
+                    translation_segments=seg_list, # Dual-save for robust UI loading
                     phase='awaiting_translation_review',
                     status='awaiting_validation',
                     progress=60,

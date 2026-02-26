@@ -13,6 +13,9 @@ from pathlib import Path  # ADDED: Missing import
 import numpy as np
 import soundfile as sf
 import librosa
+import pipmaster as pm
+import logging
+logger = logging.getLogger("logic")
 
 # CRITICAL: Re-apply SVML workaround BEFORE any torch import or operation
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -45,6 +48,24 @@ def _is_svml_error(error_msg: str) -> bool:
     return any(kw in error_msg.lower() for kw in svml_keywords)
 
 
+def _clean_text_for_f5(text: str) -> str:
+    """Normalize text to prevent F5-TTS internal sequence errors."""
+    import re
+    if not text: return ""
+    # 1. Replace ellipses and multiple dashes with a single comma (F5 prefers commas for pauses)
+    text = re.sub(r'\.{2,}', ',', text)
+    text = re.sub(r'-{2,}', ',', text)
+    # 2. Collapse multiple spaces
+    text = re.sub(r'\s+', ' ', text)
+    # 3. Remove non-standard symbols but keep basic punctuation
+    text = re.sub(r'[^\w\s,.\?!\']', '', text)
+    # 4. Ensure it doesn't end with a hanging space
+    text = text.strip()
+    # 5. F5-TTS stability: ensure it ends with punctuation
+    if text and text[-1] not in ('.', '!', '?', ','):
+        text += '.'
+    return text
+
 def generate_speech_f5_robust(
     text: str,
     ref_audio_path: str,
@@ -54,15 +75,44 @@ def generate_speech_f5_robust(
     max_retries: int = 3
 ) -> Tuple[np.ndarray, int]:
     """
-    F5-TTS inference with comprehensive SVML error handling.
+    F5-TTS inference with comprehensive error handling.
     
-    Automatically retries with CPU fallback when Intel vectorization errors occur.
+    CRITICAL: F5-TTS requires PERFECT alignment between ref_text and ref_audio.
+    Mismatches cause gibberish output.
     """
     from f5_tts.infer.utils_infer import infer_process
     
-    # Prepare reference audio (10 second limit)
+    # Pre-process text for alignment stability
+    processed_text = _clean_text_for_f5(text)
+    if not processed_text:
+        logger.warning("F5-TTS: Empty text after cleaning, returning silence")
+        return np.zeros(24000, dtype=np.float32), 24000
+    
+    logger.info(f"F5-TTS Input (cleaned): '{processed_text[:100]}...'")
+    
+    # CRITICAL: Prepare HIGH-QUALITY reference audio
+    # F5 is extremely sensitive to noise/quality
     ref_audio, sr = librosa.load(ref_audio_path, sr=24000, mono=True)
-    ref_audio = ref_audio[:240_000]  # 10s @ 24kHz
+    
+    # Normalize reference audio to prevent clipping artifacts
+    ref_audio = ref_audio.astype(np.float32)
+    peak = np.max(np.abs(ref_audio))
+    if peak > 0:
+        ref_audio = ref_audio / peak * 0.95
+    
+    # CRITICAL: Use 3-8 second reference (F5 sweet spot)
+    # Too short = poor quality, too long = alignment drift
+    ref_duration = len(ref_audio) / 24000
+    if ref_duration < 3.0:
+        logger.warning(f"F5-TTS: Reference audio too short ({ref_duration:.1f}s), quality may suffer")
+    elif ref_duration > 15.0:
+        # Take middle 8 seconds to avoid silence at edges
+        start_sample = int(len(ref_audio) * 0.2)  # Skip first 20%
+        ref_audio = ref_audio[start_sample:start_sample + (8 * 24000)]
+        logger.info(f"F5-TTS: Trimmed reference to 8s from {ref_duration:.1f}s")
+    elif ref_duration > 8.0:
+        # Take first 8 seconds
+        ref_audio = ref_audio[:8 * 24000]
     
     with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
         sf.write(f.name, ref_audio, 24000)
@@ -93,19 +143,31 @@ def generate_speech_f5_robust(
                 model = model_obj
                 voc = vocoder
             
-            print(f"[F5-TTS] Attempt {attempt + 1}/{max_retries} on {actual_device.upper()}")
+            logger.info(f"[F5-TTS] Attempt {attempt + 1}/{max_retries} on {actual_device.upper()}")
+            
+            # CRITICAL: Provide reference text for alignment
+            # F5 uses this to align the reference audio with phonemes
+            # Leaving it empty causes gibberish - we need APPROXIMATE transcript
+            # of the reference audio, OR use the target text if reference is from
+            # the same speaker saying similar content
+            
+            # Strategy: Use the target text as ref_text hint
+            # This works when reference sample is from the same speaker
+            # saying semantically similar content
+            ref_text_hint = processed_text[:100]  # First 100 chars as alignment hint
             
             # Run inference with all warnings suppressed
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 gen_audio, sr_out, _ = infer_process(
                     ref_audio=ref_tmp,
-                    ref_text="",
-                    gen_text=text,
+                    ref_text=ref_text_hint,  # CRITICAL: Provide alignment hint
+                    gen_text=processed_text,
                     model_obj=model,
                     vocoder=voc,
                     mel_spec_type="vocos",
                     device=actual_device,
+                    speed=1.0,  # Prevent speed artifacts
                 )
             
             # Success: restore model to original device if moved
@@ -115,17 +177,36 @@ def generate_speech_f5_robust(
                     if hasattr(vocoder, 'to'):
                         vocoder.to(original_device)
                 except Exception as e:
-                    print(f"[F5-TTS] Warning: Could not restore models to {original_device}: {e}")
+                    logger.warning(f"[F5-TTS] Could not restore models to {original_device}: {e}")
             
             # Process output audio
             if hasattr(gen_audio, 'cpu'):
                 gen_audio = gen_audio.cpu().numpy()
             audio = np.asarray(gen_audio).flatten()
             
+            # QUALITY CHECK: Detect gibberish audio
+            # Gibberish typically has very low variance or extreme spikes
+            audio_std = np.std(audio)
+            audio_peak = np.max(np.abs(audio))
+            
+            if audio_std < 0.001:
+                raise ValueError(f"F5-TTS produced near-silent audio (std={audio_std:.6f}), likely gibberish")
+            
+            if audio_peak > 10.0:
+                raise ValueError(f"F5-TTS produced clipped audio (peak={audio_peak:.2f}), likely gibberish")
+            
+            # Check for NaN/Inf
+            if not np.isfinite(audio).all():
+                raise ValueError("F5-TTS produced NaN/Inf values, likely model error")
+            
+            logger.info(f"[F5-TTS] Generated {len(audio)/24000:.1f}s audio, std={audio_std:.4f}, peak={audio_peak:.4f}")
+            
             # Normalize to prevent clipping
-            peak = np.max(np.abs(audio))
-            if peak > 0.95:
-                audio = audio / peak * 0.95
+            if audio_peak > 0.95:
+                audio = audio / audio_peak * 0.95
+            elif audio_peak < 0.1 and audio_peak > 0:
+                # Boost very quiet audio
+                audio = audio / audio_peak * 0.5
             
             # Cleanup
             try:
@@ -139,15 +220,22 @@ def generate_speech_f5_robust(
             last_error = e
             error_msg = str(e)
             
-            if _is_svml_error(error_msg) and attempt < max_retries - 1:
-                print(f"  ⚠ SVML/CPU error detected, retrying with CPU...")
+            logger.error(f"[F5-TTS] Attempt {attempt + 1} failed: {error_msg}")
+            
+            # Retry logic
+            if attempt < max_retries - 1:
+                if _is_svml_error(error_msg):
+                    logger.warning("SVML/CPU error detected, retrying with CPU...")
+                elif "gibberish" in error_msg.lower() or "near-silent" in error_msg.lower():
+                    logger.warning("Quality check failed, retrying with adjusted parameters...")
+                else:
+                    logger.warning(f"Generic error, retrying...")
                 
                 # Aggressive cleanup between attempts
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                     torch.cuda.synchronize()
-                
                 time.sleep(0.5 * (attempt + 1))
                 continue
             else:
@@ -255,9 +343,11 @@ def generate_speech_lollms(
     import base64
     import time
 
-    # CRITICAL FIX: Prevent XTTS from crashing on empty text
-    if not text or not str(text).strip():
-        print("[LoLLMs TTS] Empty text provided, returning silence.")
+    # CRITICAL FIX: Prevent XTTS from crashing on empty or symbol-only text
+    import re
+    # Check for at least one alphanumeric character
+    if not text or not re.search(r'[a-zA-Z0-9]', str(text)):
+        print(f"[LoLLMs TTS] Text '{text}' is empty or invalid for engine. Returning silence.")
         return np.zeros(24000, dtype=np.float32), 24000
 
     # Get LoLLMs configuration - ONLY use native LoLLMs endpoint
@@ -426,22 +516,49 @@ def generate_speech(
     """
     Unified speech generation with automatic engine selection and SVML protection.
     
+    Supported Engines:
+        - xtts: Coqui XTTS v2 (recommended, most stable)
+        - f5: F5-TTS (high quality, sensitive to input)
+        - fishspeech: FishSpeech API (remote/local)
+        - lollms: LoLLMs TTS API (remote)
+        - bark: Suno Bark (creative, emotional)
+        - styletts2: StyleTTS2 (fast, high quality)
+        - piper: Piper TTS (fastest, no cloning)
+    
     Args:
         text: Text to synthesize
-        ref_audio_path: Path to reference audio file (required for F5/FishSpeech/LoLLMs voice cloning)
-        engine: 'f5', 'fishspeech', 'lollms', or None for platform-aware default
-        device: Preferred compute device (ignored for FishSpeech and LoLLMs)
+        ref_audio_path: Path to reference audio file (required for cloning engines)
+        engine: Engine name or None for auto-select
+        device: Preferred compute device ('cuda' or 'cpu')
     
     Returns:
         (audio_array, sample_rate)
     """
     # Auto-select engine if not specified
     if engine is None:
-        engine = 'fishspeech' if os.name == 'nt' else 'f5'
+        engine = get_default_tts_engine()
     
     engine = engine.lower()
     
-    if engine == 'fishspeech':
+    # Route to appropriate engine
+    if engine == 'xtts':
+        if not ref_audio_path:
+            raise ValueError("XTTS requires a reference audio file for voice cloning")
+        return generate_speech_xtts(text, ref_audio_path, device, **kwargs)
+    
+    elif engine == 'bark':
+        return generate_speech_bark(text, device, **kwargs)
+    
+    elif engine == 'styletts2':
+        if not ref_audio_path:
+            raise ValueError("StyleTTS2 requires a reference audio file")
+        return generate_speech_styletts2(text, ref_audio_path, device, **kwargs)
+    
+    elif engine == 'piper':
+        voice = kwargs.get('voice', 'en_US-lessac-medium')
+        return generate_speech_piper(text, voice, **kwargs)
+    
+    elif engine == 'fishspeech':
         if not ref_audio_path:
             raise ValueError("FishSpeech requires a reference audio file")
         return generate_speech_fishspeech(text, ref_audio_path, **kwargs)
@@ -497,19 +614,379 @@ def generate_speech(
     
 
 def get_default_tts_engine() -> str:
-    """Return safe default TTS engine. Windows uses FishSpeech to avoid SVML."""
-    if sys.platform == 'win32' or os.name == 'nt':
-        return 'fishspeech'
+    """Return safe default TTS engine based on platform and available hardware."""
+    # Priority order: xtts (most stable) > f5 (high quality) > fishspeech (fallback)
     
-    # Linux/Mac: use F5-TTS if GPU available
     try:
         import torch
-        if torch.cuda.is_available():
-            return 'f5'
+        has_gpu = torch.cuda.is_available()
     except:
-        pass
+        has_gpu = False
     
-    return 'fishspeech'
+    # XTTS is most stable across platforms
+    if has_gpu:
+        return 'xtts'
+    
+    # CPU fallback: use lightweight engines
+    if sys.platform == 'win32' or os.name == 'nt':
+        return 'piper'  # Fast CPU inference
+    
+    return 'xtts'  # XTTS works on CPU too, just slower
+
+
+def generate_speech_xtts(
+    text: str,
+    ref_audio_path: str,
+    device: str = "cuda",
+    language: str = "en",
+    **kwargs
+) -> Tuple[np.ndarray, int]:
+    """
+    Coqui XTTS v2 - Most stable multilingual voice cloning.
+    
+    Pros: Very stable, supports 16 languages, good quality
+    Cons: Slower than F5, requires more VRAM (~4GB)
+    """
+    try:
+        pm.ensure_packages("TTS>=0.22.0")
+        from TTS.api import TTS
+    except ImportError:
+        raise ImportError(
+            "Coqui TTS not installed. Install with:\n"
+            "  pip install TTS"
+        )
+    
+    import tempfile
+    
+    logger.info(f"[XTTS] Generating speech with voice cloning (lang={language})")
+    
+    # Load model (cached after first load)
+    tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+    
+    # Clean text for XTTS
+    text = text.strip()
+    if not text:
+        return np.zeros(24000, dtype=np.float32), 24000
+    
+    # XTTS max length is ~250 chars, split if needed
+    max_chars = 250
+    chunks = []
+    
+    if len(text) > max_chars:
+        # Split at sentence boundaries
+        sentences = text.replace('!', '.').replace('?', '.').split('.')
+        current_chunk = ""
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            if len(current_chunk) + len(sentence) + 1 <= max_chars:
+                current_chunk += sentence + ". "
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + ". "
+        
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+    else:
+        chunks = [text]
+    
+    # Generate audio for each chunk
+    audio_chunks = []
+    
+    for i, chunk in enumerate(chunks):
+        logger.info(f"[XTTS] Processing chunk {i+1}/{len(chunks)}: '{chunk[:50]}...'")
+        
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+            try:
+                tts.tts_to_file(
+                    text=chunk,
+                    speaker_wav=ref_audio_path,
+                    language=language,
+                    file_path=tmp.name
+                )
+                
+                # Load generated audio
+                audio, sr = sf.read(tmp.name)
+                
+                # Ensure mono
+                if len(audio.shape) > 1:
+                    audio = audio.mean(axis=1)
+                
+                # Resample to 24kHz
+                if sr != 24000:
+                    audio = librosa.resample(audio, orig_sr=sr, target_sr=24000)
+                
+                audio_chunks.append(audio)
+                
+            finally:
+                try:
+                    os.unlink(tmp.name)
+                except:
+                    pass
+    
+    # Concatenate chunks with small silence
+    if len(audio_chunks) > 1:
+        silence = np.zeros(int(0.2 * 24000))  # 200ms silence
+        audio = np.concatenate([
+            chunk if i == 0 else np.concatenate([silence, chunk])
+            for i, chunk in enumerate(audio_chunks)
+        ])
+    else:
+        audio = audio_chunks[0]
+    
+    # Normalize
+    peak = np.max(np.abs(audio))
+    if peak > 0.95:
+        audio = audio / peak * 0.95
+    elif peak < 0.1 and peak > 0:
+        audio = audio / peak * 0.5
+    
+    logger.info(f"[XTTS] Generated {len(audio)/24000:.1f}s audio")
+    
+    return audio.astype(np.float32), 24000
+
+
+def generate_speech_bark(
+    text: str,
+    device: str = "cuda",
+    voice_preset: str = "v2/en_speaker_6",
+    **kwargs
+) -> Tuple[np.ndarray, int]:
+    """
+    Suno Bark - Creative, emotional speech with sound effects.
+    
+    Pros: Can do emotions, laughter, music; creative
+    Cons: No voice cloning, less controllable, slower
+    
+    Voice presets: v2/en_speaker_0 through v2/en_speaker_9
+    """
+    try:
+        from bark import SAMPLE_RATE, generate_audio, preload_models
+    except ImportError:
+        raise ImportError(
+            "Bark not installed. Install with:\n"
+            "  pip install git+https://github.com/suno-ai/bark.git"
+        )
+    
+    logger.info(f"[Bark] Generating speech with preset {voice_preset}")
+    
+    # Load models (cached)
+    preload_models()
+    
+    # Bark supports special tokens for emotions
+    # [laughter], [laughs], [sighs], [music], [gasps], [clears throat]
+    # CAPITALIZATION = emphasis
+    
+    # Clean text
+    text = text.strip()
+    if not text:
+        return np.zeros(SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE
+    
+    # Bark max length ~14 seconds of speech (~200 chars)
+    max_chars = 200
+    chunks = []
+    
+    if len(text) > max_chars:
+        sentences = text.replace('!', '.').replace('?', '.').split('.')
+        current_chunk = ""
+        
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            
+            if len(current_chunk) + len(sentence) + 1 <= max_chars:
+                current_chunk += sentence + ". "
+            else:
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                current_chunk = sentence + ". "
+        
+        if current_chunk:
+            chunks.append(current_chunk.strip())
+    else:
+        chunks = [text]
+    
+    # Generate chunks
+    audio_chunks = []
+    
+    for i, chunk in enumerate(chunks):
+        logger.info(f"[Bark] Chunk {i+1}/{len(chunks)}: '{chunk[:50]}...'")
+        
+        # Add voice preset to text
+        chunk_with_preset = f"[{voice_preset}] {chunk}"
+        
+        audio = generate_audio(chunk_with_preset)
+        audio_chunks.append(audio)
+    
+    # Concatenate
+    if len(audio_chunks) > 1:
+        silence = np.zeros(int(0.3 * SAMPLE_RATE))
+        audio = np.concatenate([
+            chunk if i == 0 else np.concatenate([silence, chunk])
+            for i, chunk in enumerate(audio_chunks)
+        ])
+    else:
+        audio = audio_chunks[0]
+    
+    # Normalize
+    peak = np.max(np.abs(audio))
+    if peak > 0.95:
+        audio = audio / peak * 0.95
+    
+    logger.info(f"[Bark] Generated {len(audio)/SAMPLE_RATE:.1f}s audio")
+    
+    return audio.astype(np.float32), SAMPLE_RATE
+
+
+def generate_speech_styletts2(
+    text: str,
+    ref_audio_path: str,
+    device: str = "cuda",
+    **kwargs
+) -> Tuple[np.ndarray, int]:
+    """
+    StyleTTS2 - Fast, high-quality voice cloning.
+    
+    Pros: Fast inference, good quality, low VRAM
+    Cons: Less robust than XTTS, English-only
+    """
+    try:
+        from styletts2 import tts
+    except ImportError:
+        raise ImportError(
+            "StyleTTS2 not installed. Install with:\n"
+            "  pip install git+https://github.com/yl4579/StyleTTS2.git"
+        )
+    
+    logger.info("[StyleTTS2] Generating speech")
+    
+    # Initialize model (cached)
+    model = tts.StyleTTS2()
+    
+    # Clean text
+    text = text.strip()
+    if not text:
+        return np.zeros(24000, dtype=np.float32), 24000
+    
+    # Load reference
+    ref_audio, sr = librosa.load(ref_audio_path, sr=24000, mono=True)
+    
+    # Generate
+    audio = model.inference(
+        text=text,
+        ref_s=ref_audio,
+        alpha=0.3,  # Style mixing weight
+        beta=0.7,   # Content preservation
+        diffusion_steps=10,
+        embedding_scale=1.0
+    )
+    
+    # Normalize
+    peak = np.max(np.abs(audio))
+    if peak > 0.95:
+        audio = audio / peak * 0.95
+    
+    logger.info(f"[StyleTTS2] Generated {len(audio)/24000:.1f}s audio")
+    
+    return audio.astype(np.float32), 24000
+
+
+def generate_speech_piper(
+    text: str,
+    voice: str = "en_US-lessac-medium",
+    **kwargs
+) -> Tuple[np.ndarray, int]:
+    """
+    Piper TTS - Ultra-fast CPU inference (no voice cloning).
+    
+    Pros: Extremely fast CPU inference, many voices, low resource
+    Cons: No voice cloning, lower quality than neural models
+    
+    Popular voices:
+        - en_US-lessac-medium (male, clear)
+        - en_US-amy-medium (female, clear)
+        - en_GB-alan-medium (British male)
+    """
+    try:
+        import subprocess
+        import shutil as sh
+    except ImportError:
+        raise ImportError("subprocess or shutil not available")
+    
+    logger.info(f"[Piper] Generating speech with voice {voice}")
+    
+    # Check if piper binary is available
+    piper_bin = sh.which("piper")
+    if not piper_bin:
+        raise RuntimeError(
+            "Piper binary not found. Install from:\n"
+            "  https://github.com/rhasspy/piper/releases\n"
+            "Or: pip install piper-tts"
+        )
+    
+    # Clean text
+    text = text.strip()
+    if not text:
+        return np.zeros(22050, dtype=np.float32), 22050
+    
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as txt_file:
+        txt_file.write(text)
+        txt_path = txt_file.name
+    
+    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as wav_file:
+        wav_path = wav_file.name
+    
+    try:
+        # Run piper
+        cmd = [
+            piper_bin,
+            "--model", voice,
+            "--output_file", wav_path
+        ]
+        
+        with open(txt_path, 'r') as txt:
+            result = subprocess.run(
+                cmd,
+                stdin=txt,
+                capture_output=True,
+                timeout=30
+            )
+        
+        if result.returncode != 0:
+            raise RuntimeError(f"Piper failed: {result.stderr.decode()}")
+        
+        # Load audio
+        audio, sr = sf.read(wav_path)
+        
+        # Ensure mono
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)
+        
+        # Resample to 24kHz
+        if sr != 24000:
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=24000)
+            sr = 24000
+        
+        # Normalize
+        peak = np.max(np.abs(audio))
+        if peak > 0.95:
+            audio = audio / peak * 0.95
+        
+        logger.info(f"[Piper] Generated {len(audio)/sr:.1f}s audio")
+        
+        return audio.astype(np.float32), sr
+        
+    finally:
+        try:
+            os.unlink(txt_path)
+            os.unlink(wav_path)
+        except:
+            pass
 
 
 def get_available_voices_lollms(api_url: Optional[str] = None) -> list:

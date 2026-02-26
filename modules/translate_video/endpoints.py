@@ -71,6 +71,12 @@ class ResumeRequest(BaseModel):
 class RestartRequest(BaseModel):
     task_id: Optional[str] = None
     from_phase: Optional[str] = None
+    src_lang: Optional[str] = None
+    tgt_lang: Optional[str] = None
+    tts_engine: Optional[str] = None
+    whisper_model: Optional[str] = None
+    separate_audio: Optional[bool] = None
+    vad_threshold: Optional[float] = None
 
 # -------------------------------------------------------------------------
 # Recovery Endpoint
@@ -290,6 +296,16 @@ async def restart_task_endpoint(
         if not task:
             raise HTTPException(404, "Project not found")
         
+        # Persist updated settings before restarting
+        if request:
+            update_data = request.dict(exclude_unset=True)
+            # Remove metadata fields from DB update
+            for key in ['task_id', 'from_phase']:
+                update_data.pop(key, None)
+            
+            if update_data:
+                db.update_task(task_id, **update_data)
+
         from_phase = request.from_phase if request else None
         
         valid_phases = ['init', 'identifying', 'transcribing', 'translating', 'synthesizing', 'recomposing']
