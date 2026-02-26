@@ -127,7 +127,45 @@ export function onShow() {
         applySettingsToForm(settings);
     }
 }
-
+function exportTranscriptionMarkdown() {
+    // Placeholder – will be implemented later
+    if (!currentTaskState || (!currentTaskState.segments && !currentTaskState.transcribed_segments)) {
+        window.uiAlert('No transcription data available for export.', 'Export');
+        return;
+    }
+    const segments = currentTaskState.transcribed_segments || currentTaskState.segments || [];
+    const speakerConfig = currentTaskState.speaker_config || {};
+    // Sort segments chronologically
+    const sorted = [...segments].sort((a, b) => a.start - b.start);
+    let md = `# Transcription Export\n\n*Generated on ${new Date().toLocaleString()}*\n\n---\n\n`;
+    let lastSpeakerId = null;
+    let groupedText = '';
+    sorted.forEach((seg, i) => {
+        const sid = seg.speaker_id;
+        const spkInfo = speakerConfig[sid] || {};
+        const spkName = spkInfo.name || `Speaker ${parseInt(sid) + 1}`;
+        const text = seg.original_text ? seg.original_text.trim() : '';
+        if (sid !== lastSpeakerId) {
+            if (groupedText) md += groupedText + "\n\n";
+            md += `**${spkName}**:\n`;
+            groupedText = text;
+        } else {
+            groupedText += " " + text;
+        }
+        lastSpeakerId = sid;
+        // Append at the end of the list
+        if (i === sorted.length - 1) {
+            md += groupedText + "\n";
+        }
+    });
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `transcript_${currentTaskId || 'export'}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+}
 export function startNewProject() {
     currentTaskId = null;
     downloadedVideoPath = null;
@@ -1359,12 +1397,16 @@ function showTranscriptionReview(data) {
             <button id="save-transcription-btn" class="btn-secondary">
                 <i class="fas fa-save"></i> Save Progress
             </button>
+            <button id="export-md-btn" class="btn-secondary">
+                <i class="fas fa-file-alt"></i> Export as Markdown
+            </button>
             <button id="confirm-transcription-btn" class="btn-success">
                 <i class="fas fa-language"></i> Confirm & Translate
             </button>
         `;
         document.getElementById('confirm-transcription-btn').onclick = submitTranscriptionReview;
         document.getElementById('save-transcription-btn').onclick = () => saveStepProgress('transcription');
+        document.getElementById('export-md-btn').onclick = exportTranscriptionMarkdown;
     }
 }
 
