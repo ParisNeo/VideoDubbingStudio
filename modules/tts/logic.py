@@ -765,6 +765,8 @@ def generate_speech_bark(
     Voice presets: v2/en_speaker_0 through v2/en_speaker_9
     """
     try:
+        if not pm.is_installed("bark"):
+            pm.ensure_packages("git+https://github.com/suno-ai/bark.git")
         from bark import SAMPLE_RATE, generate_audio, preload_models
     except ImportError:
         raise ImportError(
@@ -856,6 +858,9 @@ def generate_speech_styletts2(
     Cons: Less robust than XTTS, English-only
     """
     try:
+        if not pm.is_installed("styletts2"):
+            pm.ensure_packages("git+https://github.com/yl4579/StyleTTS2.git")
+
         from styletts2 import tts
     except ImportError:
         raise ImportError(
@@ -919,10 +924,12 @@ def generate_speech_piper(
         raise ImportError("subprocess or shutil not available")
     
     logger.info(f"[Piper] Generating speech with voice {voice}")
+    pm.ensure_packages("piper-tts")
     
     # Check if piper binary is available
     piper_bin = sh.which("piper")
     if not piper_bin:
+
         raise RuntimeError(
             "Piper binary not found. Install from:\n"
             "  https://github.com/rhasspy/piper/releases\n"
