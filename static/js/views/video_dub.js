@@ -1,12 +1,6 @@
 import { postFormData, getJSON, postJSON, formatTime } from '../api.js';
 import { doSwitchView } from '../app.js';
 
-window.openMonitor = openMonitor;
-window.restartFromTask = restartFromTask;
-window.startNewProject = startNewProject;
-window.jumpToPhaseReview = jumpToPhaseReview;
-window.removeMergeGroup = removeMergeGroup;
-
 let currentWs = null;
 let currentTaskId = null;
 let downloadedVideoPath = null;
@@ -33,6 +27,13 @@ const DEFAULT_SETTINGS = {
 };
 
 export function init() {
+    // Expose to window for inline handlers safely after defininiton
+    window.openMonitor = openMonitor;
+    window.restartFromTask = restartFromTask;
+    window.startNewProject = startNewProject;
+    window.jumpToPhaseReview = jumpToPhaseReview;
+    window.removeMergeGroup = removeMergeGroup;
+
     // 1. Bind Config Form
     const configForm = document.getElementById('config-form');
     if (configForm) configForm.addEventListener('submit', handleDubStart);
@@ -404,6 +405,7 @@ async function handleDubStart(e) {
         btn.innerHTML = originalContent;
     }
 }
+
 
 async function loadAndMonitor(taskId, retryCount = 0) {
     currentTaskId = taskId;

@@ -1,12 +1,6 @@
 import { postFormData, getJSON, postJSON, formatTime } from '../api.js';
 import { doSwitchView } from '../app.js';
 
-// Global access for timeline and dashboard
-window.backToDashboard = backToDashboard;
-window.startNewTranscription = startNewTranscription;
-window.openTranscribeMonitor = openTranscribeMonitor;
-window.jumpToPhaseReview = jumpToPhaseReview;
-
 let currentTaskId = null;
 let currentWs = null;
 let transcriptionResult = null;
@@ -21,6 +15,11 @@ let speakerMergeState = {
 export function init() {
     console.log("Transcribe: init() called");
     
+    // Expose functions to window for inline HTML handlers safely after definition
+    window.startNewTranscription = startNewProject;
+    window.openTranscribeMonitor = openMonitor;
+    window.jumpToPhaseReview = jumpToPhaseReview;
+
     // Step 1: Upload Only
     const uploadOnlyBtn = document.getElementById('transcribe-upload-only-btn');
     if (uploadOnlyBtn) uploadOnlyBtn.addEventListener('click', handleInitialUpload);
@@ -403,11 +402,11 @@ function backToDashboard() {
     doSwitchView('dashboard');
 }
 
-function startNewTranscription() {
+export function startNewProject() {
     resetToUpload();
 }
 
-async function openTranscribeMonitor(taskId) {
+export async function openMonitor(taskId) {
     currentTaskId = taskId;
     try {
         const task = await getJSON(`/api/projects/${taskId}`);

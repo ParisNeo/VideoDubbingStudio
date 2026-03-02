@@ -253,18 +253,16 @@ async function openTask(taskId) {
         const task = await getJSON(`/api/projects/${taskId}`);
         
         // Route to the correct view based on source
-        if (task.source === 'transcribe') {
-            doSwitchView('transcribe');
-            // Assuming transcribe module has a similar monitor function
-            import('./transcribe.js').then(mod => {
-                if (mod.openMonitor) mod.openMonitor(taskId);
-                else mod.onShow(); // Fallback if specialized monitor isn't ready
-            });
-        } else {
-            // Default to video dubbing
-            import('./video_dub.js').then(mod => {
-                mod.openMonitor(taskId);
-            });
+        const view = (task.source === 'transcribe') ? 'transcribe' : 'video_dub';
+        
+        // switch view first (handles mod.onShow)
+        doSwitchView(view);
+        
+        // Then call monitor logic exposed to window by the modules
+        if (view === 'transcribe' && window.openTranscribeMonitor) {
+            window.openTranscribeMonitor(taskId);
+        } else if (window.openMonitor) {
+            window.openMonitor(taskId);
         }
     } catch (err) {
         console.error('Failed to route task:', err);
